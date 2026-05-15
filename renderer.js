@@ -4,6 +4,11 @@ const characterElement = document.getElementById("character");
 const debugState = document.getElementById("debug-state");
 const debugPos = document.getElementById("debug-pos");
 const debugVel = document.getElementById("debug-vel");
+const translatePrompt = document.getElementById("translate-prompt");
+const translateForm = document.getElementById("translate-form");
+const translateInput = document.getElementById("translate-input");
+const translateError = document.getElementById("translate-error");
+const translateCancelButton = document.getElementById("translate-cancel");
 const reduceMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 const STATES = Object.freeze({
@@ -44,11 +49,12 @@ const CONFIG = Object.freeze({
   runSpeedPxPerSec: 162,
   maxDeltaSec: 0.05
 });
+const INPUT_MAX_LENGTH = 2000;
 
 const pet = {
   state: STATES.IDLE,
-  x: 120,
-  y: 220,
+  x: 0,
+  y: 0,
   vx: 0,
   vy: 0,
   stateUntil: 0
@@ -59,6 +65,8 @@ let lastFrameTs = performance.now();
 let lastInteractionTs = performance.now();
 let nextAutonomousTs = lastInteractionTs + CONFIG.idleBeforeAutonomousMs;
 let prefersReducedMotion = reduceMotionQuery.matches;
+let promptOpen = false;
+let submittingInput = false;
 
 function randomInRange(min, max) {
   return min + Math.random() * (max - min);
@@ -73,6 +81,108 @@ function setBubbleText(message) {
     bubbleText.textContent = message;
   } else {
     console.error("Missing #bubble-text element:", message);
+  }
+}
+
+function setTranslateError(message = "") {
+  if (!translateError) {
+    return;
+  }
+  translateError.textContent = message;
+}
+
+function setPromptVisible(visible) {
+  if (!translatePrompt) {
+    return;
+  }
+
+  promptOpen = Boolean(visible);
+  translatePrompt.classList.toggle("hidden", !promptOpen);
+  translatePrompt.setAttribute("aria-hidden", String(!promptOpen));
+}
+
+function focusTranslateInput() {
+  if (!translateInput) {
+    return;
+  }
+
+  translateInput.focus();
+  translateInput.selectionStart = translateInput.value.length;
+  translateInput.selectionEnd = translateInput.value.length;
+}
+
+function closeTranslatePrompt(reason = "cancel") {
+  if (!promptOpen) {
+    return;
+  }
+
+  setPromptVisible(false);
+  setIgnoreMouseEvents(true);
+  setTranslateError("");
+  submittingInput = false;
+
+  if (reason === "cancel") {
+    setBubbleText("입력이 취소되었습니다.");
+  }
+}
+
+function previewText(text) {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length > 52 ? `${oneLine.slice(0, 52)}...` : oneLine;
+}
+
+async function submitTranslateInput(source = "manual") {
+  if (!window.api || typeof window.api.validateTranslateInput !== "function" || !translateInput) {
+    setTranslateError("입력 검증 API를 사용할 수 없습니다.");
+    return;
+  }
+
+  if (submittingInput) {
+    return;
+  }
+
+  submittingInput = true;
+  setTranslateError("");
+
+  try {
+    const rawText = translateInput.value ?? "";
+    const result = await window.api.validateTranslateInput(rawText);
+    if (!result?.ok) {
+      setTranslateError(result?.message ?? "입력을 확인해 주세요.");
+      focusTranslateInput();
+      return;
+    }
+
+    const normalized = result.normalized ?? "";
+    closeTranslatePrompt("submit");
+    markInteraction();
+    setState(STATES.THINK, `translate-input-${source}`, 1200);
+    setBubbleText(`번역 요청 준비: ${previewText(normalized)}`);
+  } catch (error) {
+    setTranslateError("입력 처리 중 오류가 발생했습니다.");
+    console.error("Failed to submit translate input:", error);
+  } finally {
+    submittingInput = false;
+  }
+}
+
+function openTranslatePrompt(payload = {}) {
+  if (!translateInput) {
+    return;
+  }
+
+  markInteraction();
+  const rawPrefill = typeof payload.prefillText === "string" ? payload.prefillText : "";
+  const prefillText = rawPrefill.slice(0, INPUT_MAX_LENGTH);
+
+  translateInput.value = prefillText;
+  setTranslateError("");
+  setPromptVisible(true);
+  setIgnoreMouseEvents(false);
+  focusTranslateInput();
+
+  if (payload.autoSubmit && prefillText.trim()) {
+    void submitTranslateInput(payload.source ?? "auto");
   }
 }
 
@@ -192,10 +302,17 @@ function getMovementBounds() {
 
   return {
     minX: 0,
-    minY: 96,
+    minY: 0,
     maxX: Math.max(0, width - characterWidth),
-    maxY: Math.max(96, height - characterHeight)
+    maxY: Math.max(0, height - characterHeight)
   };
+}
+
+function placePetInitialPosition() {
+  const bounds = getMovementBounds();
+  pet.x = Math.max(bounds.minX, bounds.maxX - 220);
+  pet.y = Math.max(bounds.minY, bounds.maxY - 180);
+  applyPosition();
 }
 
 function resolveBoundaryCollision(bounds) {
@@ -299,12 +416,21 @@ function bindClickThroughControl() {
   currentIgnoreMouseEvents = true;
 
   window.addEventListener("mousemove", (event) => {
+    if (promptOpen) {
+      setIgnoreMouseEvents(false);
+      return;
+    }
+
     const target = document.elementFromPoint(event.clientX, event.clientY);
     const isOnCharacter = Boolean(target && characterElement.contains(target));
     setIgnoreMouseEvents(!isOnCharacter);
   });
 
   window.addEventListener("mouseleave", () => {
+    if (promptOpen) {
+      setIgnoreMouseEvents(false);
+      return;
+    }
     setIgnoreMouseEvents(true);
   });
 
@@ -324,6 +450,66 @@ function bindClickThroughControl() {
       triggerCharacterInteraction("character-key");
     }
   });
+
+  characterElement.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    markInteraction();
+    setIgnoreMouseEvents(false);
+    window.api?.showTranslateContextMenu?.(event.clientX, event.clientY);
+  });
+}
+
+function bindTranslatePrompt() {
+  if (!translateForm || !translateInput || !translateCancelButton) {
+    return;
+  }
+
+  translateForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void submitTranslateInput("form-submit");
+  });
+
+  translateCancelButton.addEventListener("click", () => {
+    closeTranslatePrompt("cancel");
+  });
+
+  translateInput.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeTranslatePrompt("cancel");
+      return;
+    }
+
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void submitTranslateInput("enter");
+    }
+  });
+
+  window.addEventListener("keydown", (event) => {
+    if (!promptOpen) {
+      return;
+    }
+
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeTranslatePrompt("cancel");
+    }
+  });
+
+  if (window.api?.onTranslateOpenInput) {
+    window.api.onTranslateOpenInput((payload) => {
+      openTranslatePrompt(payload);
+    });
+  }
+
+  if (window.api?.onAppNotice) {
+    window.api.onAppNotice((payload) => {
+      if (typeof payload?.message === "string" && payload.message.trim()) {
+        setBubbleText(payload.message);
+      }
+    });
+  }
 }
 
 function bindUserActivityTracking() {
@@ -339,6 +525,13 @@ function bindUserActivityTracking() {
       pet.vy = 0;
       setState(STATES.IDLE, "reduce-motion-enabled");
     }
+  });
+
+  window.addEventListener("resize", () => {
+    const bounds = getMovementBounds();
+    pet.x = Math.min(bounds.maxX, Math.max(bounds.minX, pet.x));
+    pet.y = Math.min(bounds.maxY, Math.max(bounds.minY, pet.y));
+    applyPosition();
   });
 }
 
@@ -356,7 +549,8 @@ async function bootstrap() {
 
   setBubbleText(`보안 셸 준비 완료 (${ping}) · v${version}`);
   setState(STATES.IDLE, "bootstrap");
-  applyPosition();
+  placePetInitialPosition();
+  bindTranslatePrompt();
   bindClickThroughControl();
   bindUserActivityTracking();
 
