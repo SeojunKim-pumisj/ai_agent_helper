@@ -34,6 +34,7 @@ body {
   background: rgba(255, 255, 255, 0.92);
   box-shadow: 0 10px 20px rgba(15, 20, 30, 0.16);
   color: #17202a;
+  pointer-events: none;
 }
 
 .bubble p {
@@ -54,6 +55,8 @@ body {
   box-shadow: 0 12px 24px rgba(22, 27, 33, 0.25);
   transform-origin: center bottom;
   animation: float 2.4s ease-in-out infinite;
+  pointer-events: auto;
+  cursor: pointer;
 }
 
 .character-eye {

@@ -3,6 +3,16 @@ const { app, BrowserWindow, ipcMain, screen } = require("electron");
 
 let mainWindow;
 
+function setWindowMouseIgnore(ignore) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  mainWindow.setIgnoreMouseEvents(Boolean(ignore), {
+    forward: Boolean(ignore)
+  });
+}
+
 function createMainWindow() {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize;
 
@@ -28,11 +38,19 @@ function createMainWindow() {
   mainWindow.setAlwaysOnTop(true, "screen-saver");
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   mainWindow.loadFile("index.html");
+  setWindowMouseIgnore(true);
 }
 
 app.whenReady().then(() => {
   ipcMain.handle("app:ping", () => "pong");
   ipcMain.handle("app:get-version", () => app.getVersion());
+  ipcMain.on("window:set-ignore-mouse-events", (event, ignore) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) {
+      return;
+    }
+
+    setWindowMouseIgnore(ignore);
+  });
 
   createMainWindow();
 
