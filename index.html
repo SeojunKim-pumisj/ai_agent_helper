@@ -16,11 +16,17 @@
         <p id="bubble-text">TranslateMate 준비 완료</p>
       </section>
 
-      <section class="character" id="character" role="img" aria-label="캐릭터 셸">
+      <section class="character state-idle" id="character" role="button" tabindex="0" aria-label="캐릭터 셸">
         <div class="character-eye left"></div>
         <div class="character-eye right"></div>
         <div class="character-mouth"></div>
       </section>
+
+      <aside class="debug-panel" id="debug-panel" aria-label="상태 디버그">
+        <p><strong>state</strong>: <span id="debug-state">idle</span></p>
+        <p><strong>pos</strong>: <span id="debug-pos">0, 0</span></p>
+        <p><strong>vel</strong>: <span id="debug-vel">0, 0</span></p>
+      </aside>
     </main>
 
     <script src="./renderer.js"></script>
