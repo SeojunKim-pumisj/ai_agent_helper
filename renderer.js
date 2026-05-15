@@ -4,6 +4,7 @@ const characterElement = document.getElementById("character");
 const debugState = document.getElementById("debug-state");
 const debugPos = document.getElementById("debug-pos");
 const debugVel = document.getElementById("debug-vel");
+const reduceMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 const STATES = Object.freeze({
   IDLE: "idle",
@@ -57,6 +58,7 @@ let currentIgnoreMouseEvents = true;
 let lastFrameTs = performance.now();
 let lastInteractionTs = performance.now();
 let nextAutonomousTs = lastInteractionTs + CONFIG.idleBeforeAutonomousMs;
+let prefersReducedMotion = reduceMotionQuery.matches;
 
 function randomInRange(min, max) {
   return min + Math.random() * (max - min);
@@ -149,6 +151,16 @@ function startLocomotion(runMode, reason) {
 }
 
 function triggerAutonomousAction() {
+  if (prefersReducedMotion) {
+    const motionSafeState = Math.random() < 0.5 ? STATES.SPEAK : STATES.PLAY;
+    const motionSafeMessageKey = motionSafeState === STATES.SPEAK ? "speak" : "play";
+    const motionSafeDuration = motionSafeState === STATES.SPEAK ? 2200 : 1800;
+
+    setBubbleText(pickRandom(AUTONOMOUS_MESSAGES[motionSafeMessageKey]));
+    setState(motionSafeState, "autonomous-motion-safe", motionSafeDuration);
+    return;
+  }
+
   const roll = Math.random();
 
   if (roll < 0.45) {
@@ -248,6 +260,12 @@ function updateStateTimer(nowTs) {
 }
 
 function maybeTriggerAutonomous(nowTs) {
+  if (prefersReducedMotion && (pet.state === STATES.WALK || pet.state === STATES.RUN)) {
+    pet.vx = 0;
+    pet.vy = 0;
+    setState(STATES.IDLE, "reduce-motion-autonomous-guard");
+  }
+
   if (nowTs - lastInteractionTs < CONFIG.idleBeforeAutonomousMs) {
     return;
   }
@@ -290,10 +308,21 @@ function bindClickThroughControl() {
     setIgnoreMouseEvents(true);
   });
 
-  characterElement.addEventListener("click", () => {
+  const triggerCharacterInteraction = (reason) => {
     markInteraction();
     setBubbleText("클릭 반응: 상태 점검 완료!");
-    setState(STATES.SPEAK, "character-click", 1000);
+    setState(STATES.SPEAK, reason, 1000);
+  };
+
+  characterElement.addEventListener("click", () => {
+    triggerCharacterInteraction("character-click");
+  });
+
+  characterElement.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      triggerCharacterInteraction("character-key");
+    }
   });
 }
 
@@ -302,6 +331,15 @@ function bindUserActivityTracking() {
   for (const eventName of events) {
     window.addEventListener(eventName, markInteraction, { passive: true });
   }
+
+  reduceMotionQuery.addEventListener("change", (event) => {
+    prefersReducedMotion = event.matches;
+    if (prefersReducedMotion && (pet.state === STATES.WALK || pet.state === STATES.RUN)) {
+      pet.vx = 0;
+      pet.vy = 0;
+      setState(STATES.IDLE, "reduce-motion-enabled");
+    }
+  });
 }
 
 async function bootstrap() {
