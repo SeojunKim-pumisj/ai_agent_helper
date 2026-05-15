@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TranslateMate</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="app-shell" aria-label="TranslateMate shell">
+      <section class="bubble" id="speech-bubble" aria-live="polite">
+        <p id="bubble-text">TranslateMate 준비 완료</p>
+      </section>
+
+      <section class="character" id="character" role="img" aria-label="캐릭터 셸">
+        <div class="character-eye left"></div>
+        <div class="character-eye right"></div>
+        <div class="character-mouth"></div>
+      </section>
+    </main>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>
