@@ -135,3 +135,27 @@
   - 말풍선 스크롤 가능하도록 `.bubble`을 인터랙티브 영역으로 전환(`pointer-events: auto`)
   - 말풍선 접근성 보강: `index.html` 말풍선에 `tabindex="0"` 및 `aria-label` 추가
   - 클릭스루 제어에 말풍선 히트체크(`isPointOnBubble`)를 추가해 말풍선 영역에서 마우스 이벤트 수신 유지
+
+### 2026-05-16 - Task 7 진행: 설정 창/트레이/보안 저장소 구현
+- 시스템 트레이 기능 추가:
+  - 트레이 메뉴에 `설정 열기`, `앱 숨기기/표시`, `종료` 액션 제공
+  - 트레이 클릭으로 오버레이 표시/숨김 토글
+- 설정 창 UI 신규 구현:
+  - `settings.html`, `settings.css`, `settings.js` 추가
+  - Papago Client ID/Secret, 기본 번역 언어, 이동 속도, 알림음, 단축키 입력/저장 지원
+- 설정 저장/로드 파이프라인 추가:
+  - 일반 설정은 사용자 데이터 경로의 JSON 파일에 저장
+  - 시작 시 설정 로드 및 런타임 반영
+- 민감정보 저장 보안 강화:
+  - `keytar` 사용 가능 시 우선 저장
+  - 불가 시 Electron `safeStorage` 암호화 파일 저장으로 fallback
+  - 평문 키 저장 금지
+- 단축키 동적 재등록 지원:
+  - 설정 저장 시 새 단축키를 즉시 등록
+  - 등록 실패 시 기존 단축키 유지 및 오류 피드백 반환
+- 런타임 적용:
+  - 메인 렌더러에 `settings:updated` 이벤트 전파
+  - 번역 대상 언어/이동 속도/알림음 설정 즉시 반영
+- 검증:
+  - `node --check main.js`, `node --check preload.js`, `node --check renderer.js`, `node --check settings.js`
+  - `npm start` 스모크 실행 후 `electron` 프로세스 정리 완료

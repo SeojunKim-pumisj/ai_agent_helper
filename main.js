@@ -1,3 +1,4 @@
+const fs = require("node:fs/promises");
 const path = require("node:path");
 const {
   app,
@@ -6,21 +7,91 @@ const {
   globalShortcut,
   ipcMain,
   Menu,
-  screen
+  screen,
+  Tray,
+  safeStorage
 } = require("electron");
 
 let mainWindow;
+let settingsWindow;
+let tray;
+
 const DEFAULT_TRANSLATE_SHORTCUT = "CommandOrControl+Shift+T";
 const PAPAGO_ENDPOINT = "https://papago.apigw.ntruss.com/nmt/v1/translation";
 const PAPAGO_TIMEOUT_MS = 5000;
 const PAPAGO_MAX_RETRIES = 1;
+
+const SETTINGS_FILE_NAME = "settings.json";
+const SECRETS_FILE_NAME = "secrets.json";
+const KEYTAR_SERVICE_NAME = "TranslateMate";
+const KEYTAR_ACCOUNT_ID = "papago-client-id";
+const KEYTAR_ACCOUNT_SECRET = "papago-client-secret";
+
+const DEFAULT_SETTINGS = Object.freeze({
+  targetLang: "ko",
+  moveSpeed: 1,
+  soundEnabled: false,
+  translateShortcut: DEFAULT_TRANSLATE_SHORTCUT
+});
+
+const SUPPORTED_TARGET_LANGS = new Set([
+  "ko",
+  "en",
+  "ja",
+  "zh-CN",
+  "zh-TW",
+  "es",
+  "fr",
+  "de",
+  "ru",
+  "vi",
+  "th",
+  "id"
+]);
+
+let runtimeSettings = { ...DEFAULT_SETTINGS };
+let currentShortcut = DEFAULT_TRANSLATE_SHORTCUT;
+let secretState = {
+  clientId: "",
+  clientSecret: "",
+  storage: "none"
+};
+
+function getSettingsFilePath() {
+  return path.join(app.getPath("userData"), SETTINGS_FILE_NAME);
+}
+
+function getSecretsFilePath() {
+  return path.join(app.getPath("userData"), SECRETS_FILE_NAME);
+}
+
+async function readJsonFileSafe(filePath) {
+  try {
+    const raw = await fs.readFile(filePath, "utf8");
+    const parsed = JSON.parse(raw);
+    return typeof parsed === "object" && parsed !== null ? parsed : null;
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return null;
+    }
+    return null;
+  }
+}
+
+async function writeJsonFileAtomic(filePath, payload) {
+  const directory = path.dirname(filePath);
+  await fs.mkdir(directory, { recursive: true });
+  const tempPath = `${filePath}.tmp`;
+  await fs.writeFile(tempPath, JSON.stringify(payload, null, 2), "utf8");
+  await fs.rename(tempPath, filePath);
+}
 
 function normalizeErrorCode(code) {
   if (code === "auth") {
     return {
       ok: false,
       code,
-      message: "Papago 인증에 실패했습니다. Client ID/Secret을 확인하세요."
+      message: "Papago 인증에 실패했습니다. Client ID/Secret을 확인해 주세요."
     };
   }
 
@@ -28,7 +99,7 @@ function normalizeErrorCode(code) {
     return {
       ok: false,
       code,
-      message: "Papago API 키가 설정되지 않았습니다. 환경변수를 확인하세요."
+      message: "Papago API 키가 설정되지 않았습니다. 설정 창에서 API 키를 입력해 주세요."
     };
   }
 
@@ -52,7 +123,7 @@ function normalizeErrorCode(code) {
     return {
       ok: false,
       code,
-      message: "네트워크 오류로 번역에 실패했습니다. 연결 상태를 확인하세요."
+      message: "네트워크 오류로 번역에 실패했습니다. 연결 상태를 확인해 주세요."
     };
   }
 
@@ -72,14 +143,23 @@ function normalizeErrorCode(code) {
 }
 
 function getPapagoCredentials() {
-  const clientId = (process.env.PAPAGO_CLIENT_ID ?? "").trim();
-  const clientSecret = (process.env.PAPAGO_CLIENT_SECRET ?? "").trim();
-
-  if (!clientId || !clientSecret) {
-    return null;
+  if (secretState.clientId && secretState.clientSecret) {
+    return {
+      clientId: secretState.clientId,
+      clientSecret: secretState.clientSecret
+    };
   }
 
-  return { clientId, clientSecret };
+  const envClientId = (process.env.PAPAGO_CLIENT_ID ?? "").trim();
+  const envClientSecret = (process.env.PAPAGO_CLIENT_SECRET ?? "").trim();
+  if (envClientId && envClientSecret) {
+    return {
+      clientId: envClientId,
+      clientSecret: envClientSecret
+    };
+  }
+
+  return null;
 }
 
 function delay(ms) {
@@ -88,17 +168,13 @@ function delay(ms) {
   });
 }
 
-async function requestPapagoTranslation({ text, source, target }) {
-  const credentials = getPapagoCredentials();
+async function requestPapagoTranslation({ text, source, target, credentialsOverride = null }) {
+  const credentials = credentialsOverride ?? getPapagoCredentials();
   if (!credentials) {
     return normalizeErrorCode("config");
   }
 
-  const body = new URLSearchParams({
-    source,
-    target,
-    text
-  });
+  const body = new URLSearchParams({ source, target, text });
 
   for (let attempt = 0; attempt <= PAPAGO_MAX_RETRIES; attempt += 1) {
     const controller = new AbortController();
@@ -121,7 +197,7 @@ async function requestPapagoTranslation({ text, source, target }) {
       let responseJson = null;
       try {
         responseJson = await response.json();
-      } catch (error) {
+      } catch {
         responseJson = null;
       }
 
@@ -159,8 +235,7 @@ async function requestPapagoTranslation({ text, source, target }) {
 
       return normalizeErrorCode("unknown");
     } catch (error) {
-      const isTimeout = error?.name === "AbortError";
-      if (isTimeout) {
+      if (error?.name === "AbortError") {
         return normalizeErrorCode("timeout");
       }
 
@@ -207,7 +282,7 @@ function setWindowMouseIgnore(ignore) {
   });
 }
 
-function sendRendererEvent(channel, payload) {
+function sendMainRendererEvent(channel, payload) {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return;
   }
@@ -215,13 +290,21 @@ function sendRendererEvent(channel, payload) {
   mainWindow.webContents.send(channel, payload);
 }
 
+function sendSettingsRendererEvent(channel, payload) {
+  if (!settingsWindow || settingsWindow.isDestroyed()) {
+    return;
+  }
+
+  settingsWindow.webContents.send(channel, payload);
+}
+
 function notifyUser(message, level = "info") {
-  sendRendererEvent("app:notice", { level, message });
+  sendMainRendererEvent("app:notice", { level, message });
 }
 
 function openTranslateInput(payload = {}) {
   const prefillText = typeof payload.prefillText === "string" ? payload.prefillText : "";
-  sendRendererEvent("translate:open-input", {
+  sendMainRendererEvent("translate:open-input", {
     source: payload.source ?? "manual",
     prefillText,
     autoSubmit: Boolean(payload.autoSubmit)
@@ -231,7 +314,7 @@ function openTranslateInput(payload = {}) {
 function readClipboardText() {
   try {
     return clipboard.readText().trim();
-  } catch (error) {
+  } catch {
     return "";
   }
 }
@@ -249,14 +332,37 @@ function openTranslateInputFromShortcut() {
   }
 }
 
-function registerTranslateShortcut() {
-  const registered = globalShortcut.register(DEFAULT_TRANSLATE_SHORTCUT, openTranslateInputFromShortcut);
-  if (!registered) {
-    notifyUser("단축키 등록에 실패했습니다. 다른 앱에서 사용 중일 수 있습니다.", "error");
-    return;
+function applyTranslateShortcut(nextShortcut, { silent = false } = {}) {
+  const candidate = (typeof nextShortcut === "string" ? nextShortcut.trim() : "") || DEFAULT_TRANSLATE_SHORTCUT;
+
+  if (candidate === currentShortcut && globalShortcut.isRegistered(candidate)) {
+    return { ok: true, shortcut: candidate };
   }
 
-  notifyUser(`단축키가 등록되었습니다: ${DEFAULT_TRANSLATE_SHORTCUT}`, "info");
+  const previousShortcut = currentShortcut;
+  const hadPreviousRegistration = previousShortcut && globalShortcut.isRegistered(previousShortcut);
+
+  if (hadPreviousRegistration) {
+    globalShortcut.unregister(previousShortcut);
+  }
+
+  const registered = globalShortcut.register(candidate, openTranslateInputFromShortcut);
+  if (!registered) {
+    if (hadPreviousRegistration) {
+      globalShortcut.register(previousShortcut, openTranslateInputFromShortcut);
+    }
+    return {
+      ok: false,
+      message: "단축키 등록에 실패했습니다. 이미 다른 앱에서 사용 중일 수 있습니다."
+    };
+  }
+
+  currentShortcut = candidate;
+  if (!silent) {
+    notifyUser(`단축키가 적용되었습니다: ${candidate}`, "info");
+  }
+
+  return { ok: true, shortcut: candidate };
 }
 
 function popupTranslateContextMenu(x, y) {
@@ -282,6 +388,13 @@ function popupTranslateContextMenu(x, y) {
         if (!clipboardText) {
           notifyUser("클립보드가 비어 있어 입력창만 열었습니다.", "warning");
         }
+      }
+    },
+    { type: "separator" },
+    {
+      label: "설정",
+      click: () => {
+        openSettingsWindow();
       }
     }
   ]);
@@ -330,11 +443,429 @@ function createMainWindow() {
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   mainWindow.loadFile("index.html");
   setWindowMouseIgnore(true);
+
+  mainWindow.on("show", () => updateTrayMenu());
+  mainWindow.on("hide", () => updateTrayMenu());
 }
 
-app.whenReady().then(() => {
+function createSettingsWindow() {
+  settingsWindow = new BrowserWindow({
+    width: 460,
+    height: 620,
+    minWidth: 430,
+    minHeight: 580,
+    show: false,
+    autoHideMenuBar: true,
+    backgroundColor: "#f7f9fc",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+
+  settingsWindow.loadFile("settings.html");
+
+  settingsWindow.on("close", (event) => {
+    if (!app.isQuiting) {
+      event.preventDefault();
+      settingsWindow.hide();
+    }
+  });
+
+  settingsWindow.on("closed", () => {
+    settingsWindow = null;
+  });
+}
+
+function openSettingsWindow() {
+  if (!settingsWindow || settingsWindow.isDestroyed()) {
+    createSettingsWindow();
+  }
+
+  settingsWindow.show();
+  settingsWindow.focus();
+}
+
+function toggleMainWindowVisibility() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  if (mainWindow.isVisible()) {
+    mainWindow.hide();
+  } else {
+    mainWindow.show();
+    mainWindow.focus();
+  }
+}
+
+function updateTrayMenu() {
+  if (!tray) {
+    return;
+  }
+
+  const isVisible = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible());
+  const visibilityLabel = isVisible ? "앱 숨기기" : "앱 표시";
+
+  const menu = Menu.buildFromTemplate([
+    {
+      label: "설정 열기",
+      click: () => openSettingsWindow()
+    },
+    {
+      label: visibilityLabel,
+      click: () => toggleMainWindowVisibility()
+    },
+    { type: "separator" },
+    {
+      label: "종료",
+      click: () => {
+        app.isQuiting = true;
+        app.quit();
+      }
+    }
+  ]);
+
+  tray.setContextMenu(menu);
+}
+
+function createTray() {
+  const trayIconPath = path.join(__dirname, "assets", "icon.ico");
+  tray = new Tray(trayIconPath);
+  tray.setToolTip("TranslateMate");
+  tray.on("click", () => toggleMainWindowVisibility());
+  updateTrayMenu();
+}
+
+function normalizeSettingsInput(input) {
+  const raw = typeof input === "object" && input !== null ? input : {};
+
+  const targetLang = typeof raw.targetLang === "string" ? raw.targetLang.trim() : "";
+  const moveSpeedRaw = Number(raw.moveSpeed);
+  const moveSpeed = Number.isFinite(moveSpeedRaw) ? moveSpeedRaw : NaN;
+  const soundEnabled = Boolean(raw.soundEnabled);
+  const translateShortcut = typeof raw.translateShortcut === "string" ? raw.translateShortcut.trim() : "";
+
+  if (!SUPPORTED_TARGET_LANGS.has(targetLang)) {
+    return { ok: false, field: "targetLang", message: "지원하지 않는 번역 언어입니다." };
+  }
+
+  if (!Number.isFinite(moveSpeed) || moveSpeed < 0.5 || moveSpeed > 2.5) {
+    return { ok: false, field: "moveSpeed", message: "이동 속도는 0.5~2.5 범위여야 합니다." };
+  }
+
+  if (!translateShortcut) {
+    return { ok: false, field: "translateShortcut", message: "단축키를 입력해 주세요." };
+  }
+
+  const normalizedSettings = {
+    targetLang,
+    moveSpeed: Math.round(moveSpeed * 100) / 100,
+    soundEnabled,
+    translateShortcut
+  };
+
+  const clientId = typeof raw.clientId === "string" ? raw.clientId.trim() : "";
+  const clientSecret = typeof raw.clientSecret === "string" ? raw.clientSecret.trim() : "";
+
+  const wantsCredentialUpdate = clientId.length > 0 || clientSecret.length > 0;
+  if (wantsCredentialUpdate && (!clientId || !clientSecret)) {
+    return {
+      ok: false,
+      field: "credentials",
+      message: "Client ID와 Client Secret은 함께 입력해야 합니다."
+    };
+  }
+
+  return {
+    ok: true,
+    settings: normalizedSettings,
+    credentialsInput: wantsCredentialUpdate ? { clientId, clientSecret } : null
+  };
+}
+
+async function loadSettingsFromDisk() {
+  const raw = await readJsonFileSafe(getSettingsFilePath());
+  if (!raw) {
+    runtimeSettings = { ...DEFAULT_SETTINGS };
+    return;
+  }
+
+  const merged = {
+    targetLang: typeof raw.targetLang === "string" ? raw.targetLang : DEFAULT_SETTINGS.targetLang,
+    moveSpeed: Number.isFinite(Number(raw.moveSpeed)) ? Number(raw.moveSpeed) : DEFAULT_SETTINGS.moveSpeed,
+    soundEnabled: Boolean(raw.soundEnabled),
+    translateShortcut: typeof raw.translateShortcut === "string" ? raw.translateShortcut : DEFAULT_SETTINGS.translateShortcut
+  };
+
+  const normalized = normalizeSettingsInput(merged);
+  runtimeSettings = normalized.ok ? normalized.settings : { ...DEFAULT_SETTINGS };
+}
+
+async function saveSettingsToDisk(settings) {
+  await writeJsonFileAtomic(getSettingsFilePath(), settings);
+}
+
+function loadKeytarModule() {
+  try {
+    // Prefer keytar when it is available in the runtime.
+    // Fallback path is handled when require fails.
+    // eslint-disable-next-line global-require
+    return require("keytar");
+  } catch {
+    return null;
+  }
+}
+
+async function loadCredentialsFromKeytar() {
+  const keytar = loadKeytarModule();
+  if (!keytar) {
+    return null;
+  }
+
+  const clientId = (await keytar.getPassword(KEYTAR_SERVICE_NAME, KEYTAR_ACCOUNT_ID)) ?? "";
+  const clientSecret = (await keytar.getPassword(KEYTAR_SERVICE_NAME, KEYTAR_ACCOUNT_SECRET)) ?? "";
+
+  if (!clientId || !clientSecret) {
+    return null;
+  }
+
+  return {
+    clientId,
+    clientSecret,
+    storage: "keytar"
+  };
+}
+
+async function saveCredentialsToKeytar(clientId, clientSecret) {
+  const keytar = loadKeytarModule();
+  if (!keytar) {
+    return false;
+  }
+
+  await keytar.setPassword(KEYTAR_SERVICE_NAME, KEYTAR_ACCOUNT_ID, clientId);
+  await keytar.setPassword(KEYTAR_SERVICE_NAME, KEYTAR_ACCOUNT_SECRET, clientSecret);
+  return true;
+}
+
+async function loadCredentialsFromEncryptedFile() {
+  const raw = await readJsonFileSafe(getSecretsFilePath());
+  if (!raw || typeof raw.clientId !== "string" || typeof raw.clientSecret !== "string") {
+    return null;
+  }
+
+  if (!safeStorage.isEncryptionAvailable()) {
+    return null;
+  }
+
+  try {
+    const clientId = safeStorage.decryptString(Buffer.from(raw.clientId, "base64"));
+    const clientSecret = safeStorage.decryptString(Buffer.from(raw.clientSecret, "base64"));
+
+    if (!clientId || !clientSecret) {
+      return null;
+    }
+
+    return {
+      clientId,
+      clientSecret,
+      storage: "safeStorage"
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function saveCredentialsToEncryptedFile(clientId, clientSecret) {
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error("safeStorage-unavailable");
+  }
+
+  const payload = {
+    clientId: safeStorage.encryptString(clientId).toString("base64"),
+    clientSecret: safeStorage.encryptString(clientSecret).toString("base64"),
+    updatedAt: new Date().toISOString()
+  };
+
+  await writeJsonFileAtomic(getSecretsFilePath(), payload);
+}
+
+async function loadStoredCredentials() {
+  const fromKeytar = await loadCredentialsFromKeytar();
+  if (fromKeytar) {
+    secretState = fromKeytar;
+    return;
+  }
+
+  const fromEncryptedFile = await loadCredentialsFromEncryptedFile();
+  if (fromEncryptedFile) {
+    secretState = fromEncryptedFile;
+    return;
+  }
+
+  secretState = {
+    clientId: "",
+    clientSecret: "",
+    storage: "none"
+  };
+}
+
+async function saveStoredCredentials(clientId, clientSecret) {
+  const savedInKeytar = await saveCredentialsToKeytar(clientId, clientSecret);
+  if (savedInKeytar) {
+    secretState = {
+      clientId,
+      clientSecret,
+      storage: "keytar"
+    };
+    return;
+  }
+
+  await saveCredentialsToEncryptedFile(clientId, clientSecret);
+  secretState = {
+    clientId,
+    clientSecret,
+    storage: "safeStorage"
+  };
+}
+
+function getSettingsSnapshot() {
+  return {
+    settings: { ...runtimeSettings },
+    hasCredentials: Boolean(getPapagoCredentials()),
+    credentialStorage: secretState.storage
+  };
+}
+
+function broadcastSettingsUpdated() {
+  const payload = getSettingsSnapshot();
+  sendMainRendererEvent("settings:updated", payload);
+  sendSettingsRendererEvent("settings:updated", payload);
+}
+
+function isAllowedIpcSender(event) {
+  const sender = event?.sender;
+  if (!sender) {
+    return false;
+  }
+
+  const fromMain = Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents);
+  const fromSettings = Boolean(settingsWindow && !settingsWindow.isDestroyed() && sender === settingsWindow.webContents);
+  return fromMain || fromSettings;
+}
+
+function isSettingsWindowSender(event) {
+  const sender = event?.sender;
+  if (!sender || !settingsWindow || settingsWindow.isDestroyed()) {
+    return false;
+  }
+
+  return sender === settingsWindow.webContents;
+}
+
+function registerIpcHandlers() {
   ipcMain.handle("app:ping", () => "pong");
   ipcMain.handle("app:get-version", () => app.getVersion());
+
+  ipcMain.handle("settings:get-runtime", (event) => {
+    if (!isAllowedIpcSender(event)) {
+      return { ok: false, message: "허용되지 않은 요청입니다." };
+    }
+
+    return {
+      ok: true,
+      ...getSettingsSnapshot()
+    };
+  });
+
+  ipcMain.handle("settings:get", (event) => {
+    if (!isSettingsWindowSender(event)) {
+      return { ok: false, message: "허용되지 않은 요청입니다." };
+    }
+
+    return {
+      ok: true,
+      ...getSettingsSnapshot()
+    };
+  });
+
+  ipcMain.handle("settings:save", async (event, payload) => {
+    if (!isSettingsWindowSender(event)) {
+      return { ok: false, message: "허용되지 않은 요청입니다." };
+    }
+
+    const normalized = normalizeSettingsInput(payload);
+    if (!normalized.ok) {
+      return normalized;
+    }
+
+    const previousSettings = { ...runtimeSettings };
+    const previousShortcut = currentShortcut;
+
+    if (normalized.credentialsInput) {
+      const testResult = await requestPapagoTranslation({
+        text: "key validation",
+        source: "en",
+        target: normalized.settings.targetLang,
+        credentialsOverride: normalized.credentialsInput
+      });
+
+      if (!testResult.ok) {
+        return {
+          ok: false,
+          field: "credentials",
+          message: testResult.message
+        };
+      }
+
+      try {
+        await saveStoredCredentials(normalized.credentialsInput.clientId, normalized.credentialsInput.clientSecret);
+      } catch {
+        return {
+          ok: false,
+          field: "credentials",
+          message: "API 키를 안전하게 저장하지 못했습니다."
+        };
+      }
+    }
+
+    const shortcutResult = applyTranslateShortcut(normalized.settings.translateShortcut, { silent: true });
+    if (!shortcutResult.ok) {
+      return {
+        ok: false,
+        field: "translateShortcut",
+        message: shortcutResult.message
+      };
+    }
+
+    runtimeSettings = normalized.settings;
+
+    try {
+      await saveSettingsToDisk(runtimeSettings);
+    } catch {
+      runtimeSettings = previousSettings;
+      if (currentShortcut !== previousShortcut) {
+        applyTranslateShortcut(previousShortcut, { silent: true });
+      }
+
+      return {
+        ok: false,
+        field: "general",
+        message: "설정을 저장하지 못했습니다. 다시 시도해 주세요."
+      };
+    }
+
+    broadcastSettingsUpdated();
+    notifyUser("설정이 저장되었습니다.", "info");
+
+    return {
+      ok: true,
+      ...getSettingsSnapshot()
+    };
+  });
+
   ipcMain.handle("translate:validate-input", (event, payload) => {
     if (!mainWindow || event.sender !== mainWindow.webContents) {
       return { ok: false, reason: "forbidden", message: "요청 주체가 유효하지 않습니다." };
@@ -344,7 +875,7 @@ app.whenReady().then(() => {
     const text = typeof payload === "string" ? payload : "";
     const normalized = text.trim();
     if (!normalized) {
-      return { ok: false, reason: "empty", message: "번역할 텍스트를 입력하세요." };
+      return { ok: false, reason: "empty", message: "번역할 텍스트를 입력해 주세요." };
     }
 
     if (normalized.length > maxLength) {
@@ -357,6 +888,7 @@ app.whenReady().then(() => {
 
     return { ok: true, normalized };
   });
+
   ipcMain.handle("translate:request", async (event, payload) => {
     if (!mainWindow || event.sender !== mainWindow.webContents) {
       return {
@@ -371,7 +903,7 @@ app.whenReady().then(() => {
       return {
         ok: false,
         code: "empty",
-        message: "번역할 텍스트를 입력하세요."
+        message: "번역할 텍스트를 입력해 주세요."
       };
     }
 
@@ -385,13 +917,9 @@ app.whenReady().then(() => {
     }
 
     const source = typeof payload?.source === "string" && payload.source.trim() ? payload.source.trim() : "auto";
-    const target = typeof payload?.target === "string" && payload.target.trim() ? payload.target.trim() : "ko";
+    const target = typeof payload?.target === "string" && payload.target.trim() ? payload.target.trim() : runtimeSettings.targetLang;
 
-    return requestPapagoTranslation({
-      text,
-      source,
-      target
-    });
+    return requestPapagoTranslation({ text, source, target });
   });
 
   ipcMain.on("window:set-ignore-mouse-events", (event, ignore) => {
@@ -401,6 +929,7 @@ app.whenReady().then(() => {
 
     setWindowMouseIgnore(ignore);
   });
+
   ipcMain.on("translate:show-context-menu", (event, rawPosition) => {
     if (!mainWindow || event.sender !== mainWindow.webContents) {
       return;
@@ -410,6 +939,7 @@ app.whenReady().then(() => {
     const y = Number.isFinite(rawPosition?.y) ? Math.max(0, Math.floor(rawPosition.y)) : 0;
     popupTranslateContextMenu(x, y);
   });
+
   ipcMain.on("translate:open-input", (event, payload) => {
     if (!mainWindow || event.sender !== mainWindow.webContents) {
       return;
@@ -423,9 +953,11 @@ app.whenReady().then(() => {
         prefillText: clipboardText,
         autoSubmit: clipboardText.length > 0
       });
+
       if (!clipboardText) {
         notifyUser("클립보드가 비어 있어 입력창만 열었습니다.", "warning");
       }
+
       return;
     }
 
@@ -436,9 +968,35 @@ app.whenReady().then(() => {
     });
   });
 
+  ipcMain.on("settings:open", () => {
+    openSettingsWindow();
+  });
+
+  ipcMain.on("settings:close", (event) => {
+    if (!isSettingsWindowSender(event)) {
+      return;
+    }
+
+    if (settingsWindow && !settingsWindow.isDestroyed()) {
+      settingsWindow.hide();
+    }
+  });
+}
+
+async function bootstrapApp() {
+  await loadSettingsFromDisk();
+  await loadStoredCredentials();
+
+  registerIpcHandlers();
   createMainWindow();
   fitWindowToVirtualDesktop();
-  registerTranslateShortcut();
+  createTray();
+
+  const shortcutResult = applyTranslateShortcut(runtimeSettings.translateShortcut, { silent: true });
+  if (!shortcutResult.ok) {
+    applyTranslateShortcut(DEFAULT_TRANSLATE_SHORTCUT, { silent: true });
+    notifyUser("설정된 단축키를 등록하지 못해 기본 단축키로 복구했습니다.", "warning");
+  }
 
   screen.on("display-added", fitWindowToVirtualDesktop);
   screen.on("display-removed", fitWindowToVirtualDesktop);
@@ -448,11 +1006,21 @@ app.whenReady().then(() => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createMainWindow();
       fitWindowToVirtualDesktop();
+      updateTrayMenu();
+    }
+
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show();
     }
   });
+}
+
+app.whenReady().then(() => {
+  void bootstrapApp();
 });
 
 app.on("will-quit", () => {
+  app.isQuiting = true;
   globalShortcut.unregisterAll();
 });
 
