@@ -11,6 +11,172 @@ const {
 
 let mainWindow;
 const DEFAULT_TRANSLATE_SHORTCUT = "CommandOrControl+Shift+T";
+const PAPAGO_ENDPOINT = "https://papago.apigw.ntruss.com/nmt/v1/translation";
+const PAPAGO_TIMEOUT_MS = 5000;
+const PAPAGO_MAX_RETRIES = 1;
+
+function normalizeErrorCode(code) {
+  if (code === "auth") {
+    return {
+      ok: false,
+      code,
+      message: "Papago 인증에 실패했습니다. Client ID/Secret을 확인하세요."
+    };
+  }
+
+  if (code === "config") {
+    return {
+      ok: false,
+      code,
+      message: "Papago API 키가 설정되지 않았습니다. 환경변수를 확인하세요."
+    };
+  }
+
+  if (code === "timeout") {
+    return {
+      ok: false,
+      code,
+      message: "번역 요청 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요."
+    };
+  }
+
+  if (code === "quota") {
+    return {
+      ok: false,
+      code,
+      message: "Papago 요청 한도에 도달했습니다. 잠시 후 다시 시도해 주세요."
+    };
+  }
+
+  if (code === "network") {
+    return {
+      ok: false,
+      code,
+      message: "네트워크 오류로 번역에 실패했습니다. 연결 상태를 확인하세요."
+    };
+  }
+
+  if (code === "server") {
+    return {
+      ok: false,
+      code,
+      message: "Papago 서버 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+    };
+  }
+
+  return {
+    ok: false,
+    code: "unknown",
+    message: "번역 중 알 수 없는 오류가 발생했습니다."
+  };
+}
+
+function getPapagoCredentials() {
+  const clientId = (process.env.PAPAGO_CLIENT_ID ?? "").trim();
+  const clientSecret = (process.env.PAPAGO_CLIENT_SECRET ?? "").trim();
+
+  if (!clientId || !clientSecret) {
+    return null;
+  }
+
+  return { clientId, clientSecret };
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function requestPapagoTranslation({ text, source, target }) {
+  const credentials = getPapagoCredentials();
+  if (!credentials) {
+    return normalizeErrorCode("config");
+  }
+
+  const body = new URLSearchParams({
+    source,
+    target,
+    text
+  });
+
+  for (let attempt = 0; attempt <= PAPAGO_MAX_RETRIES; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+    }, PAPAGO_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(PAPAGO_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+          "X-NCP-APIGW-API-KEY-ID": credentials.clientId,
+          "X-NCP-APIGW-API-KEY": credentials.clientSecret
+        },
+        body,
+        signal: controller.signal
+      });
+
+      let responseJson = null;
+      try {
+        responseJson = await response.json();
+      } catch (error) {
+        responseJson = null;
+      }
+
+      if (response.ok) {
+        const translatedText = responseJson?.message?.result?.translatedText;
+        if (typeof translatedText === "string" && translatedText.length > 0) {
+          return {
+            ok: true,
+            translatedText,
+            sourceLang: responseJson?.message?.result?.srcLangType ?? source,
+            targetLang: responseJson?.message?.result?.tarLangType ?? target
+          };
+        }
+      }
+
+      if (response.status === 401 || response.status === 403) {
+        return normalizeErrorCode("auth");
+      }
+
+      if (response.status === 429) {
+        if (attempt < PAPAGO_MAX_RETRIES) {
+          await delay(350);
+          continue;
+        }
+        return normalizeErrorCode("quota");
+      }
+
+      if (response.status >= 500) {
+        if (attempt < PAPAGO_MAX_RETRIES) {
+          await delay(350);
+          continue;
+        }
+        return normalizeErrorCode("server");
+      }
+
+      return normalizeErrorCode("unknown");
+    } catch (error) {
+      const isTimeout = error?.name === "AbortError";
+      if (isTimeout) {
+        return normalizeErrorCode("timeout");
+      }
+
+      if (attempt < PAPAGO_MAX_RETRIES) {
+        await delay(250);
+        continue;
+      }
+
+      return normalizeErrorCode("network");
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  return normalizeErrorCode("unknown");
+}
 
 function getVirtualDesktopBounds() {
   const displays = screen.getAllDisplays();
@@ -188,6 +354,42 @@ app.whenReady().then(() => {
     }
 
     return { ok: true, normalized };
+  });
+  ipcMain.handle("translate:request", async (event, payload) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) {
+      return {
+        ok: false,
+        code: "forbidden",
+        message: "요청 주체가 유효하지 않습니다."
+      };
+    }
+
+    const text = typeof payload?.text === "string" ? payload.text.trim() : "";
+    if (!text) {
+      return {
+        ok: false,
+        code: "empty",
+        message: "번역할 텍스트를 입력하세요."
+      };
+    }
+
+    const maxLength = 2000;
+    if (text.length > maxLength) {
+      return {
+        ok: false,
+        code: "too-long",
+        message: `입력은 ${maxLength}자 이하로 제한됩니다.`
+      };
+    }
+
+    const source = typeof payload?.source === "string" && payload.source.trim() ? payload.source.trim() : "auto";
+    const target = typeof payload?.target === "string" && payload.target.trim() ? payload.target.trim() : "ko";
+
+    return requestPapagoTranslation({
+      text,
+      source,
+      target
+    });
   });
 
   ipcMain.on("window:set-ignore-mouse-events", (event, ignore) => {
