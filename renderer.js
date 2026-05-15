@@ -1,5 +1,6 @@
 const appShell = document.querySelector(".app-shell");
 const bubbleText = document.getElementById("bubble-text");
+const speechBubble = document.getElementById("speech-bubble");
 const characterElement = document.getElementById("character");
 const debugState = document.getElementById("debug-state");
 const debugPos = document.getElementById("debug-pos");
@@ -50,6 +51,7 @@ const CONFIG = Object.freeze({
   maxDeltaSec: 0.05
 });
 const INPUT_MAX_LENGTH = 2000;
+const DEFAULT_TRANSLATION_TARGET = "ko";
 
 const pet = {
   state: STATES.IDLE,
@@ -79,9 +81,43 @@ function pickRandom(items) {
 function setBubbleText(message) {
   if (bubbleText) {
     bubbleText.textContent = message;
+    requestAnimationFrame(positionSpeechBubble);
   } else {
     console.error("Missing #bubble-text element:", message);
   }
+}
+
+function positionSpeechBubble() {
+  if (!speechBubble || !characterElement) {
+    return;
+  }
+
+  const shellRect = appShell ? appShell.getBoundingClientRect() : null;
+  const shellWidth = shellRect ? shellRect.width : window.innerWidth;
+  const shellHeight = shellRect ? shellRect.height : window.innerHeight;
+  const shellLeft = shellRect ? shellRect.left : 0;
+  const shellTop = shellRect ? shellRect.top : 0;
+  const characterRect = characterElement.getBoundingClientRect();
+  const bubbleRect = speechBubble.getBoundingClientRect();
+  const margin = 10;
+
+  const characterX = characterRect.left - shellLeft;
+  const characterY = characterRect.top - shellTop;
+  const characterCenterX = characterX + characterRect.width / 2;
+
+  let left = characterCenterX - bubbleRect.width / 2;
+  let top = characterY - bubbleRect.height - 10;
+
+  left = Math.max(margin, Math.min(left, shellWidth - bubbleRect.width - margin));
+
+  if (top < margin) {
+    top = characterY + characterRect.height + 8;
+  }
+
+  top = Math.max(margin, Math.min(top, shellHeight - bubbleRect.height - margin));
+
+  speechBubble.style.left = `${Math.round(left)}px`;
+  speechBubble.style.top = `${Math.round(top)}px`;
 }
 
 function setTranslateError(message = "") {
@@ -132,8 +168,13 @@ function previewText(text) {
 }
 
 async function submitTranslateInput(source = "manual") {
-  if (!window.api || typeof window.api.validateTranslateInput !== "function" || !translateInput) {
-    setTranslateError("입력 검증 API를 사용할 수 없습니다.");
+  if (
+    !window.api ||
+    typeof window.api.validateTranslateInput !== "function" ||
+    typeof window.api.translateText !== "function" ||
+    !translateInput
+  ) {
+    setTranslateError("번역 API를 사용할 수 없습니다.");
     return;
   }
 
@@ -156,8 +197,20 @@ async function submitTranslateInput(source = "manual") {
     const normalized = result.normalized ?? "";
     closeTranslatePrompt("submit");
     markInteraction();
-    setState(STATES.THINK, `translate-input-${source}`, 1200);
-    setBubbleText(`번역 요청 준비: ${previewText(normalized)}`);
+    setState(STATES.THINK, `translate-request-${source}`, 6000);
+    setBubbleText(`번역 중... ${previewText(normalized)}`);
+
+    const translated = await window.api.translateText(normalized, "auto", DEFAULT_TRANSLATION_TARGET);
+    if (!translated?.ok) {
+      const errorMessage = translated?.message ?? "번역 요청에 실패했습니다.";
+      setState(STATES.SPEAK, `translate-failed-${source}`, 1800);
+      setBubbleText(errorMessage);
+      return;
+    }
+
+    const targetLabel = translated.targetLang ? `[${translated.targetLang}] ` : "";
+    setState(STATES.SPEAK, `translate-success-${source}`, 2400);
+    setBubbleText(`${targetLabel}${translated.translatedText}`);
   } catch (error) {
     setTranslateError("입력 처리 중 오류가 발생했습니다.");
     console.error("Failed to submit translate input:", error);
@@ -351,6 +404,7 @@ function applyPosition() {
 
   characterElement.style.left = `${pet.x}px`;
   characterElement.style.top = `${pet.y}px`;
+  positionSpeechBubble();
 }
 
 function updateMovement(deltaSec) {
@@ -513,7 +567,7 @@ function bindTranslatePrompt() {
 }
 
 function bindUserActivityTracking() {
-  const events = ["mousemove", "pointerdown", "keydown", "wheel"];
+  const events = ["pointerdown", "keydown", "wheel"];
   for (const eventName of events) {
     window.addEventListener(eventName, markInteraction, { passive: true });
   }
@@ -532,6 +586,7 @@ function bindUserActivityTracking() {
     pet.x = Math.min(bounds.maxX, Math.max(bounds.minX, pet.x));
     pet.y = Math.min(bounds.maxY, Math.max(bounds.minY, pet.y));
     applyPosition();
+    positionSpeechBubble();
   });
 }
 
@@ -550,6 +605,7 @@ async function bootstrap() {
   setBubbleText(`보안 셸 준비 완료 (${ping}) · v${version}`);
   setState(STATES.IDLE, "bootstrap");
   placePetInitialPosition();
+  positionSpeechBubble();
   bindTranslatePrompt();
   bindClickThroughControl();
   bindUserActivityTracking();

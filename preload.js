@@ -4,6 +4,9 @@ contextBridge.exposeInMainWorld("api", Object.freeze({
   ping: () => ipcRenderer.invoke("app:ping"),
   getVersion: () => ipcRenderer.invoke("app:get-version"),
   validateTranslateInput: (text) => ipcRenderer.invoke("translate:validate-input", text),
+  translateText: (text, source = "auto", target = "ko") => {
+    return ipcRenderer.invoke("translate:request", { text, source, target });
+  },
   setIgnoreMouseEvents: (ignore) => {
     ipcRenderer.send("window:set-ignore-mouse-events", Boolean(ignore));
   },
