@@ -1,0 +1,144 @@
+:root {
+  color-scheme: light;
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  width: 100%;
+  min-height: 100%;
+  background: linear-gradient(180deg, #f7f9fc, #eef2f9);
+  color: #15202b;
+}
+
+.settings-shell {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 18px 16px 20px;
+}
+
+h1 {
+  margin: 0 0 12px;
+  font-size: 22px;
+}
+
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid rgba(44, 62, 80, 0.2);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 6px 12px rgba(20, 28, 40, 0.08);
+}
+
+.card h2 {
+  margin: 0 0 2px;
+  font-size: 15px;
+}
+
+label {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+input[type="text"],
+input[type="password"],
+select {
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 1px solid rgba(55, 76, 98, 0.35);
+  border-radius: 8px;
+  font: inherit;
+  color: inherit;
+  background: #fff;
+}
+
+input[type="range"] {
+  width: 100%;
+}
+
+input:focus-visible,
+select:focus-visible,
+button:focus-visible {
+  outline: 2px solid #3f77c8;
+  outline-offset: 1px;
+}
+
+.hint {
+  margin: 0;
+  font-size: 12px;
+  color: #4b5f74;
+}
+
+.meta {
+  margin: 0;
+  font-size: 12px;
+  color: #425466;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.save-message {
+  min-height: 18px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.save-message.error {
+  color: #b42318;
+}
+
+.save-message.success {
+  color: #166534;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+button {
+  border: 1px solid rgba(53, 71, 90, 0.35);
+  border-radius: 8px;
+  min-height: 34px;
+  padding: 0 12px;
+  font: inherit;
+  cursor: pointer;
+}
+
+button.primary {
+  color: #fff;
+  background: #2f6ecf;
+}
+
+button.primary:hover {
+  background: #275fb3;
+}
+
+button.ghost {
+  background: #fff;
+}
+
+button.ghost:hover {
+  background: #eef3fa;
+}

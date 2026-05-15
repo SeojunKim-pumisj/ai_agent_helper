@@ -32,14 +32,14 @@ const STATE_VISUALS = Object.freeze({
 
 const AUTONOMOUS_MESSAGES = Object.freeze({
   speak: [
-    "작업 잘 하고 있어요.",
+    "작업 잘 되고 있어요.",
     "필요하면 바로 도와드릴게요.",
     "잠깐 쉬고 다시 집중해볼까요?"
   ],
   play: [
-    "한 바퀴 산책 중!",
-    "깡총 모드 발동!",
-    "심심해서 놀고 있어요."
+    "오늘도 탐험 중!",
+    "깜짝 모드 발동!",
+    "신나게 놀고 있어요!"
   ]
 });
 
@@ -51,7 +51,6 @@ const CONFIG = Object.freeze({
   maxDeltaSec: 0.05
 });
 const INPUT_MAX_LENGTH = 2000;
-const DEFAULT_TRANSLATION_TARGET = "ko";
 const CLICK_REACTION_COOLDOWN_MS = 450;
 const TYPING_EFFECT_THRESHOLD = 40;
 const TYPING_EFFECT_INTERVAL_MS = 20;
@@ -80,6 +79,12 @@ let pointerMovedDuringDrag = false;
 let ignoreNextCharacterClick = false;
 let lastCharacterReactionTs = 0;
 let lastMousePoint = null;
+let audioContext = null;
+const runtimeOptions = {
+  targetLang: "ko",
+  moveSpeed: 1,
+  soundEnabled: false
+};
 
 function randomInRange(min, max) {
   return min + Math.random() * (max - min);
@@ -87,6 +92,65 @@ function randomInRange(min, max) {
 
 function pickRandom(items) {
   return items[Math.floor(Math.random() * items.length)];
+}
+
+function applyRuntimeSettings(payload = {}) {
+  const incoming = typeof payload?.settings === "object" && payload.settings !== null
+    ? payload.settings
+    : payload;
+
+  const targetLang = typeof incoming.targetLang === "string" && incoming.targetLang.trim()
+    ? incoming.targetLang.trim()
+    : runtimeOptions.targetLang;
+  const moveSpeed = Number.isFinite(Number(incoming.moveSpeed))
+    ? Number(incoming.moveSpeed)
+    : runtimeOptions.moveSpeed;
+
+  runtimeOptions.targetLang = targetLang;
+  runtimeOptions.moveSpeed = Math.min(2.5, Math.max(0.5, moveSpeed));
+  runtimeOptions.soundEnabled = Boolean(incoming.soundEnabled);
+}
+
+function getWalkSpeed() {
+  return CONFIG.walkSpeedPxPerSec * runtimeOptions.moveSpeed;
+}
+
+function getRunSpeed() {
+  return CONFIG.runSpeedPxPerSec * runtimeOptions.moveSpeed;
+}
+
+function playToneIfEnabled() {
+  if (!runtimeOptions.soundEnabled) {
+    return;
+  }
+
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtx) {
+    return;
+  }
+
+  try {
+    if (!audioContext) {
+      audioContext = new AudioCtx();
+    }
+
+    const oscillator = audioContext.createOscillator();
+    const gainNode = audioContext.createGain();
+    const now = audioContext.currentTime;
+
+    oscillator.type = "sine";
+    oscillator.frequency.setValueAtTime(720, now);
+    gainNode.gain.setValueAtTime(0.0001, now);
+    gainNode.gain.exponentialRampToValueAtTime(0.04, now + 0.01);
+    gainNode.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+
+    oscillator.connect(gainNode);
+    gainNode.connect(audioContext.destination);
+    oscillator.start(now);
+    oscillator.stop(now + 0.13);
+  } catch (error) {
+    console.error("Failed to play interaction tone:", error);
+  }
 }
 
 function setBubbleText(message) {
@@ -249,7 +313,7 @@ function closeTranslatePrompt(reason = "cancel") {
   submittingInput = false;
 
   if (reason === "cancel") {
-    setBubbleText("입력이 취소되었습니다.");
+    setBubbleText("입력을 취소했습니다.");
   }
 }
 
@@ -291,7 +355,7 @@ async function submitTranslateInput(source = "manual") {
     setState(STATES.THINK, `translate-request-${source}`, 6000);
     setBubbleText(`번역 중... ${previewText(normalized)}`);
 
-    const translated = await window.api.translateText(normalized, "auto", DEFAULT_TRANSLATION_TARGET);
+    const translated = await window.api.translateText(normalized, "auto", runtimeOptions.targetLang);
     if (!translated?.ok) {
       const errorMessage = translated?.message ?? "번역 요청에 실패했습니다.";
       setState(STATES.SPEAK, `translate-failed-${source}`, 1800);
@@ -399,7 +463,7 @@ function randomizeVelocity(speedPxPerSec) {
 }
 
 function startLocomotion(runMode, reason) {
-  const speed = runMode ? CONFIG.runSpeedPxPerSec : CONFIG.walkSpeedPxPerSec;
+  const speed = runMode ? getRunSpeed() : getWalkSpeed();
   randomizeVelocity(speed);
   setState(runMode ? STATES.RUN : STATES.WALK, reason, runMode ? 1600 : 2600);
 }
@@ -484,7 +548,7 @@ function resolveBoundaryCollision(bounds) {
 
   if (collided && pet.state === STATES.IDLE) {
     setState(STATES.WALK, "collision-recovery", 900);
-    randomizeVelocity(CONFIG.walkSpeedPxPerSec);
+    randomizeVelocity(getWalkSpeed());
   }
 }
 
@@ -707,7 +771,8 @@ function bindClickThroughControl() {
 
     lastCharacterReactionTs = now;
     markInteraction();
-    setBubbleText("클릭 반응: 상태 점검 완료!");
+    playToneIfEnabled();
+    setBubbleText("클릭 반응: 상태 체크 완료!");
     setState(STATES.SPEAK, reason, 1000);
   };
 
@@ -802,6 +867,12 @@ function bindTranslatePrompt() {
       }
     });
   }
+
+  if (window.api?.onSettingsUpdated) {
+    window.api.onSettingsUpdated((payload) => {
+      applyRuntimeSettings(payload);
+    });
+  }
 }
 
 function bindUserActivityTracking() {
@@ -837,8 +908,12 @@ async function bootstrap() {
     window.api.ping(),
     window.api.getVersion()
   ]);
+  const runtimeSettings = await window.api.getRuntimeSettings();
+  if (runtimeSettings?.ok) {
+    applyRuntimeSettings(runtimeSettings);
+  }
 
-  setBubbleText(`보안 셸 준비 완료 (${ping}) · v${version}`);
+  setBubbleText(`보안 브리지 준비 완료 (${ping}) - v${version}`);
   setState(STATES.IDLE, "bootstrap");
   placePetInitialPosition();
   positionSpeechBubble();
@@ -850,6 +925,8 @@ async function bootstrap() {
 }
 
 bootstrap().catch((error) => {
-  setBubbleText("초기화 실패: 콘솔 로그를 확인하세요.");
+  setBubbleText("초기화 실패: 콘솔 로그를 확인해 주세요.");
   console.error("Renderer bootstrap failed:", error);
 });
+
+
