@@ -65,7 +65,8 @@
 * **네트워크 통신:** REST API(POST 요청)를 통한 JSON 데이터 송수신.
 
 ### 4.3 보안 및 데이터 처리
-* 사용자의 API 키는 로컬 저장소(암호화된 파일 또는 시스템 Keytar)에 안전하게 저장되어야 합니다.
+* 사용자의 API 키는 Electron `safeStorage` API(`encryptStringAsync`/`decryptStringAsync`)로 암호화해 저장해야 하며, 암복호화는 반드시 Main 프로세스에서만 수행하고 평문 키를 Renderer로 전달하지 않아야 합니다.
+* `safeStorage`는 macOS Keychain, Windows DPAPI, Linux libsecret(환경 의존) 등 OS 보안 저장 메커니즘을 사용하므로, 비동기 처리와 암복호화 실패 예외 처리를 포함해야 합니다. (`electron-store` 단독 암호화는 고보안 비밀 저장 용도로 사용하지 않음)
 * 번역 기록은 로컬에만 임시 저장되며, 외부 서버로 수집되지 않아야 합니다.
 
 ---

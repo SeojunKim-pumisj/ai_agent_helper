@@ -93,3 +93,9 @@ body {
     transform: translateY(-8px);
   }
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .character {
+    animation: none;
+  }
+}
