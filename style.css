@@ -37,6 +37,8 @@ body {
   color: #17202a;
   pointer-events: none;
   z-index: 9;
+  max-height: 180px;
+  overflow-y: auto;
 }
 
 .bubble p {

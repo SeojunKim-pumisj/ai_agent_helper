@@ -100,3 +100,25 @@
   - `node --check renderer.js`
   - `npm start` 앱 기동 확인(명령 타임아웃 시점까지 프로세스 유지)
 - 테스트 후 남은 `electron` 프로세스 정리 완료.
+
+### 2026-05-16 - PR 리뷰 반영: deprecated CSS 속성 교체
+- CodeRabbit 리뷰 코멘트 반영:
+  - `style.css`의 `word-break: break-word` 제거
+  - `overflow-wrap: anywhere` + `word-break: normal` 조합으로 변경
+- 스타일 린트 경고(deprecated keyword) 해소 목적의 최소 수정으로 반영.
+
+### 2026-05-16 - Task 6 진행: 말풍선 출력 UX/상호작용 보강 (진행중)
+- 말풍선 출력 UX 개선:
+  - 말풍선 컨테이너에 `max-height`와 `overflow-y: auto` 적용
+  - 긴 문장 출력 시 스크롤 가능한 레이아웃으로 동작
+  - 번역 결과 출력에 타이핑 효과 적용(`setBubbleTextWithTyping`)
+- 클릭 반응 중복 방지:
+  - 캐릭터 반응에 쿨다운(`CLICK_REACTION_COOLDOWN_MS`) 적용
+  - 드래그 직후 발생하는 클릭 이벤트 무시 처리
+- 드래그 앤 드롭 이동 구현:
+  - `pointerdown`/`pointermove`/`pointerup` 기반 드래그 이동
+  - 드래그 중 클릭스루 비활성화, 드롭 후 상태 복귀
+  - 화면 경계 클램프 유지
+- 검증:
+  - `node --check main.js`, `node --check preload.js`, `node --check renderer.js`
+  - `npm start` 스모크 실행 후 `electron` 프로세스 정리 완료
