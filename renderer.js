@@ -52,6 +52,9 @@ const CONFIG = Object.freeze({
 });
 const INPUT_MAX_LENGTH = 2000;
 const DEFAULT_TRANSLATION_TARGET = "ko";
+const CLICK_REACTION_COOLDOWN_MS = 450;
+const TYPING_EFFECT_THRESHOLD = 40;
+const TYPING_EFFECT_INTERVAL_MS = 20;
 
 const pet = {
   state: STATES.IDLE,
@@ -69,6 +72,14 @@ let nextAutonomousTs = lastInteractionTs + CONFIG.idleBeforeAutonomousMs;
 let prefersReducedMotion = reduceMotionQuery.matches;
 let promptOpen = false;
 let submittingInput = false;
+let typingTimer = null;
+let activeTypingToken = 0;
+let bubblePositionReady = false;
+let dragState = null;
+let pointerMovedDuringDrag = false;
+let ignoreNextCharacterClick = false;
+let lastCharacterReactionTs = 0;
+let lastMousePoint = null;
 
 function randomInRange(min, max) {
   return min + Math.random() * (max - min);
@@ -79,12 +90,90 @@ function pickRandom(items) {
 }
 
 function setBubbleText(message) {
+  if (typingTimer) {
+    clearInterval(typingTimer);
+    typingTimer = null;
+  }
+  activeTypingToken += 1;
+
   if (bubbleText) {
     bubbleText.textContent = message;
-    requestAnimationFrame(positionSpeechBubble);
+    if (speechBubble) {
+      speechBubble.scrollTop = 0;
+    }
+    requestAnimationFrame(() => {
+      positionSpeechBubble();
+      revealSpeechBubble();
+    });
   } else {
     console.error("Missing #bubble-text element:", message);
   }
+}
+
+function revealSpeechBubble() {
+  if (!speechBubble || !bubblePositionReady) {
+    return;
+  }
+  speechBubble.classList.add("is-visible");
+}
+
+function setBubbleTextWithTyping(message) {
+  if (!bubbleText) {
+    return;
+  }
+
+  const text = `${message ?? ""}`;
+  if (prefersReducedMotion || text.length < TYPING_EFFECT_THRESHOLD) {
+    setBubbleText(text);
+    return;
+  }
+
+  if (typingTimer) {
+    clearInterval(typingTimer);
+    typingTimer = null;
+  }
+
+  const token = activeTypingToken + 1;
+  activeTypingToken = token;
+
+  bubbleText.textContent = "";
+  if (speechBubble) {
+    speechBubble.scrollTop = 0;
+  }
+  requestAnimationFrame(() => {
+    positionSpeechBubble();
+    revealSpeechBubble();
+  });
+
+  let index = 0;
+  const intervalId = setInterval(() => {
+    if (!bubbleText || token !== activeTypingToken) {
+      clearInterval(intervalId);
+      if (typingTimer === intervalId) {
+        typingTimer = null;
+      }
+      return;
+    }
+
+    index += 1;
+    bubbleText.textContent = text.slice(0, index);
+    if (speechBubble) {
+      speechBubble.scrollTop = speechBubble.scrollHeight;
+    }
+    positionSpeechBubble();
+
+    if (index >= text.length) {
+      clearInterval(intervalId);
+      if (typingTimer === intervalId) {
+        typingTimer = null;
+      }
+      if (speechBubble) {
+        speechBubble.scrollTop = 0;
+      }
+      revealSpeechBubble();
+    }
+  }, TYPING_EFFECT_INTERVAL_MS);
+  typingTimer = intervalId;
 }
 
 function positionSpeechBubble() {
@@ -97,13 +186,14 @@ function positionSpeechBubble() {
   const shellHeight = shellRect ? shellRect.height : window.innerHeight;
   const shellLeft = shellRect ? shellRect.left : 0;
   const shellTop = shellRect ? shellRect.top : 0;
-  const characterRect = characterElement.getBoundingClientRect();
+  const characterWidth = characterElement.offsetWidth || 130;
+  const characterHeight = characterElement.offsetHeight || 130;
   const bubbleRect = speechBubble.getBoundingClientRect();
   const margin = 10;
 
-  const characterX = characterRect.left - shellLeft;
-  const characterY = characterRect.top - shellTop;
-  const characterCenterX = characterX + characterRect.width / 2;
+  const characterX = Number.isFinite(pet.x) ? pet.x : (characterElement.getBoundingClientRect().left - shellLeft);
+  const characterY = Number.isFinite(pet.y) ? pet.y : (characterElement.getBoundingClientRect().top - shellTop);
+  const characterCenterX = characterX + characterWidth / 2;
 
   let left = characterCenterX - bubbleRect.width / 2;
   let top = characterY - bubbleRect.height - 10;
@@ -111,13 +201,14 @@ function positionSpeechBubble() {
   left = Math.max(margin, Math.min(left, shellWidth - bubbleRect.width - margin));
 
   if (top < margin) {
-    top = characterY + characterRect.height + 8;
+    top = characterY + characterHeight + 8;
   }
 
   top = Math.max(margin, Math.min(top, shellHeight - bubbleRect.height - margin));
 
   speechBubble.style.left = `${Math.round(left)}px`;
   speechBubble.style.top = `${Math.round(top)}px`;
+  bubblePositionReady = true;
 }
 
 function setTranslateError(message = "") {
@@ -210,7 +301,7 @@ async function submitTranslateInput(source = "manual") {
 
     const targetLabel = translated.targetLang ? `[${translated.targetLang}] ` : "";
     setState(STATES.SPEAK, `translate-success-${source}`, 2400);
-    setBubbleText(`${targetLabel}${translated.translatedText}`);
+    setBubbleTextWithTyping(`${targetLabel}${translated.translatedText}`);
   } catch (error) {
     setTranslateError("입력 처리 중 오류가 발생했습니다.");
     console.error("Failed to submit translate input:", error);
@@ -407,6 +498,115 @@ function applyPosition() {
   positionSpeechBubble();
 }
 
+function isPointOnCharacter(point) {
+  if (!characterElement || !point) {
+    return false;
+  }
+
+  const rect = characterElement.getBoundingClientRect();
+  return (
+    point.x >= rect.left &&
+    point.x <= rect.right &&
+    point.y >= rect.top &&
+    point.y <= rect.bottom
+  );
+}
+
+function isPointOnBubble(point) {
+  if (!speechBubble || !point) {
+    return false;
+  }
+
+  if (!speechBubble.classList.contains("is-visible")) {
+    return false;
+  }
+
+  const rect = speechBubble.getBoundingClientRect();
+  return (
+    point.x >= rect.left &&
+    point.x <= rect.right &&
+    point.y >= rect.top &&
+    point.y <= rect.bottom
+  );
+}
+
+function syncMousePassThrough() {
+  if (dragState || promptOpen) {
+    setIgnoreMouseEvents(false);
+    return;
+  }
+
+  if (!lastMousePoint) {
+    setIgnoreMouseEvents(true);
+    return;
+  }
+
+  const onCharacter = isPointOnCharacter(lastMousePoint);
+  const onBubble = isPointOnBubble(lastMousePoint);
+  setIgnoreMouseEvents(!(onCharacter || onBubble));
+}
+
+function clampPetToBounds() {
+  const bounds = getMovementBounds();
+  pet.x = Math.min(bounds.maxX, Math.max(bounds.minX, pet.x));
+  pet.y = Math.min(bounds.maxY, Math.max(bounds.minY, pet.y));
+}
+
+function beginDrag(event) {
+  if (!characterElement || event.button !== 0 || promptOpen) {
+    return;
+  }
+
+  const characterRect = characterElement.getBoundingClientRect();
+  dragState = {
+    pointerId: event.pointerId,
+    offsetX: event.clientX - characterRect.left,
+    offsetY: event.clientY - characterRect.top
+  };
+  pointerMovedDuringDrag = false;
+  ignoreNextCharacterClick = false;
+
+  markInteraction();
+  setIgnoreMouseEvents(false);
+  pet.vx = 0;
+  pet.vy = 0;
+  setState(STATES.PLAY, "drag-start");
+}
+
+function updateDrag(event) {
+  if (!dragState || event.pointerId !== dragState.pointerId) {
+    return;
+  }
+
+  const prevX = pet.x;
+  const prevY = pet.y;
+  pet.x = event.clientX - dragState.offsetX;
+  pet.y = event.clientY - dragState.offsetY;
+  clampPetToBounds();
+  applyPosition();
+
+  if (!pointerMovedDuringDrag) {
+    const distance = Math.hypot(pet.x - prevX, pet.y - prevY);
+    if (distance > 2) {
+      pointerMovedDuringDrag = true;
+      ignoreNextCharacterClick = true;
+    }
+  }
+}
+
+function endDrag(event) {
+  if (!dragState || event.pointerId !== dragState.pointerId) {
+    return;
+  }
+
+  dragState = null;
+  markInteraction();
+  setState(STATES.IDLE, "drag-end", 250);
+  if (!promptOpen) {
+    setIgnoreMouseEvents(true);
+  }
+}
+
 function updateMovement(deltaSec) {
   if (pet.state === STATES.WALK || pet.state === STATES.RUN) {
     pet.x += pet.vx * deltaSec;
@@ -456,6 +656,7 @@ function tick(nowTs) {
   updateStateTimer(nowTs);
   maybeTriggerAutonomous(nowTs);
   updateMovement(deltaSec);
+  syncMousePassThrough();
   updateDebugPanel();
 
   requestAnimationFrame(tick);
@@ -470,31 +671,68 @@ function bindClickThroughControl() {
   currentIgnoreMouseEvents = true;
 
   window.addEventListener("mousemove", (event) => {
-    if (promptOpen) {
-      setIgnoreMouseEvents(false);
-      return;
-    }
-
-    const target = document.elementFromPoint(event.clientX, event.clientY);
-    const isOnCharacter = Boolean(target && characterElement.contains(target));
-    setIgnoreMouseEvents(!isOnCharacter);
+    lastMousePoint = {
+      x: event.clientX,
+      y: event.clientY
+    };
+    syncMousePassThrough();
   });
 
   window.addEventListener("mouseleave", () => {
-    if (promptOpen) {
-      setIgnoreMouseEvents(false);
-      return;
-    }
-    setIgnoreMouseEvents(true);
+    lastMousePoint = null;
+    syncMousePassThrough();
+  });
+
+  window.addEventListener("pointerdown", (event) => {
+    lastMousePoint = {
+      x: event.clientX,
+      y: event.clientY
+    };
+    syncMousePassThrough();
+  });
+
+  window.addEventListener("mousedown", (event) => {
+    lastMousePoint = {
+      x: event.clientX,
+      y: event.clientY
+    };
+    syncMousePassThrough();
   });
 
   const triggerCharacterInteraction = (reason) => {
+    const now = performance.now();
+    if (now - lastCharacterReactionTs < CLICK_REACTION_COOLDOWN_MS) {
+      return;
+    }
+
+    lastCharacterReactionTs = now;
     markInteraction();
     setBubbleText("클릭 반응: 상태 점검 완료!");
     setState(STATES.SPEAK, reason, 1000);
   };
 
+  characterElement.addEventListener("pointerdown", (event) => {
+    beginDrag(event);
+  });
+
+  window.addEventListener("pointermove", (event) => {
+    updateDrag(event);
+  });
+
+  window.addEventListener("pointerup", (event) => {
+    endDrag(event);
+  });
+
+  window.addEventListener("pointercancel", (event) => {
+    endDrag(event);
+  });
+
   characterElement.addEventListener("click", () => {
+    if (ignoreNextCharacterClick) {
+      ignoreNextCharacterClick = false;
+      return;
+    }
+
     triggerCharacterInteraction("character-click");
   });
 
@@ -582,9 +820,7 @@ function bindUserActivityTracking() {
   });
 
   window.addEventListener("resize", () => {
-    const bounds = getMovementBounds();
-    pet.x = Math.min(bounds.maxX, Math.max(bounds.minX, pet.x));
-    pet.y = Math.min(bounds.maxY, Math.max(bounds.minY, pet.y));
+    clampPetToBounds();
     applyPosition();
     positionSpeechBubble();
   });

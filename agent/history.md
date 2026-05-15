@@ -100,3 +100,38 @@
   - `node --check renderer.js`
   - `npm start` 앱 기동 확인(명령 타임아웃 시점까지 프로세스 유지)
 - 테스트 후 남은 `electron` 프로세스 정리 완료.
+
+### 2026-05-16 - PR 리뷰 반영: deprecated CSS 속성 교체
+- CodeRabbit 리뷰 코멘트 반영:
+  - `style.css`의 `word-break: break-word` 제거
+  - `overflow-wrap: anywhere` + `word-break: normal` 조합으로 변경
+- 스타일 린트 경고(deprecated keyword) 해소 목적의 최소 수정으로 반영.
+
+### 2026-05-16 - Task 6 진행: 말풍선 출력 UX/상호작용 보강 (진행중)
+- 말풍선 출력 UX 개선:
+  - 말풍선 컨테이너에 `max-height`와 `overflow-y: auto` 적용
+  - 긴 문장 출력 시 스크롤 가능한 레이아웃으로 동작
+  - 번역 결과 출력에 타이핑 효과 적용(`setBubbleTextWithTyping`)
+- 클릭 반응 중복 방지:
+  - 캐릭터 반응에 쿨다운(`CLICK_REACTION_COOLDOWN_MS`) 적용
+  - 드래그 직후 발생하는 클릭 이벤트 무시 처리
+- 드래그 앤 드롭 이동 구현:
+  - `pointerdown`/`pointermove`/`pointerup` 기반 드래그 이동
+  - 드래그 중 클릭스루 비활성화, 드롭 후 상태 복귀
+  - 화면 경계 클램프 유지
+- 검증:
+  - `node --check main.js`, `node --check preload.js`, `node --check renderer.js`
+  - `npm start` 스모크 실행 후 `electron` 프로세스 정리 완료
+
+### 2026-05-16 - UI 버그 수정: 클릭 후 흰색 불투명 헤더 노출 이슈 대응
+- 투명 오버레이 창 설정 보강:
+  - `main.js`의 `BrowserWindow` 옵션에 `backgroundColor: "#00000000"` 추가
+  - Windows 프레임 스타일 주입 방지를 위해 `thickFrame: false` 적용
+- Electron 버전 업그레이드:
+  - `package.json` devDependency를 `electron@^42.0.0`으로 상향
+  - 설치 결과 로컬 버전 `42.1.0`으로 반영
+- PR 리뷰 반영(코드 리뷰 댓글 2건):
+  - `renderer.js` 타이핑 인터벌 정리 로직을 로컬 `intervalId` 기준으로 수정하여 타이머 경합 방지
+  - 말풍선 스크롤 가능하도록 `.bubble`을 인터랙티브 영역으로 전환(`pointer-events: auto`)
+  - 말풍선 접근성 보강: `index.html` 말풍선에 `tabindex="0"` 및 `aria-label` 추가
+  - 클릭스루 제어에 말풍선 히트체크(`isPointOnBubble`)를 추가해 말풍선 영역에서 마우스 이벤트 수신 유지
