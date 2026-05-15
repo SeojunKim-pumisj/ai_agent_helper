@@ -122,3 +122,16 @@
 - 검증:
   - `node --check main.js`, `node --check preload.js`, `node --check renderer.js`
   - `npm start` 스모크 실행 후 `electron` 프로세스 정리 완료
+
+### 2026-05-16 - UI 버그 수정: 클릭 후 흰색 불투명 헤더 노출 이슈 대응
+- 투명 오버레이 창 설정 보강:
+  - `main.js`의 `BrowserWindow` 옵션에 `backgroundColor: "#00000000"` 추가
+  - Windows 프레임 스타일 주입 방지를 위해 `thickFrame: false` 적용
+- Electron 버전 업그레이드:
+  - `package.json` devDependency를 `electron@^42.0.0`으로 상향
+  - 설치 결과 로컬 버전 `42.1.0`으로 반영
+- PR 리뷰 반영(코드 리뷰 댓글 2건):
+  - `renderer.js` 타이핑 인터벌 정리 로직을 로컬 `intervalId` 기준으로 수정하여 타이머 경합 방지
+  - 말풍선 스크롤 가능하도록 `.bubble`을 인터랙티브 영역으로 전환(`pointer-events: auto`)
+  - 말풍선 접근성 보강: `index.html` 말풍선에 `tabindex="0"` 및 `aria-label` 추가
+  - 클릭스루 제어에 말풍선 히트체크(`isPointOnBubble`)를 추가해 말풍선 영역에서 마우스 이벤트 수신 유지

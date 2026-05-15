@@ -74,10 +74,12 @@ let promptOpen = false;
 let submittingInput = false;
 let typingTimer = null;
 let activeTypingToken = 0;
+let bubblePositionReady = false;
 let dragState = null;
 let pointerMovedDuringDrag = false;
 let ignoreNextCharacterClick = false;
 let lastCharacterReactionTs = 0;
+let lastMousePoint = null;
 
 function randomInRange(min, max) {
   return min + Math.random() * (max - min);
@@ -99,10 +101,20 @@ function setBubbleText(message) {
     if (speechBubble) {
       speechBubble.scrollTop = 0;
     }
-    requestAnimationFrame(positionSpeechBubble);
+    requestAnimationFrame(() => {
+      positionSpeechBubble();
+      revealSpeechBubble();
+    });
   } else {
     console.error("Missing #bubble-text element:", message);
   }
+}
+
+function revealSpeechBubble() {
+  if (!speechBubble || !bubblePositionReady) {
+    return;
+  }
+  speechBubble.classList.add("is-visible");
 }
 
 function setBubbleTextWithTyping(message) {
@@ -128,13 +140,18 @@ function setBubbleTextWithTyping(message) {
   if (speechBubble) {
     speechBubble.scrollTop = 0;
   }
-  requestAnimationFrame(positionSpeechBubble);
+  requestAnimationFrame(() => {
+    positionSpeechBubble();
+    revealSpeechBubble();
+  });
 
   let index = 0;
-  typingTimer = setInterval(() => {
+  const intervalId = setInterval(() => {
     if (!bubbleText || token !== activeTypingToken) {
-      clearInterval(typingTimer);
-      typingTimer = null;
+      clearInterval(intervalId);
+      if (typingTimer === intervalId) {
+        typingTimer = null;
+      }
       return;
     }
 
@@ -146,13 +163,17 @@ function setBubbleTextWithTyping(message) {
     positionSpeechBubble();
 
     if (index >= text.length) {
-      clearInterval(typingTimer);
-      typingTimer = null;
+      clearInterval(intervalId);
+      if (typingTimer === intervalId) {
+        typingTimer = null;
+      }
       if (speechBubble) {
         speechBubble.scrollTop = 0;
       }
+      revealSpeechBubble();
     }
   }, TYPING_EFFECT_INTERVAL_MS);
+  typingTimer = intervalId;
 }
 
 function positionSpeechBubble() {
@@ -165,13 +186,14 @@ function positionSpeechBubble() {
   const shellHeight = shellRect ? shellRect.height : window.innerHeight;
   const shellLeft = shellRect ? shellRect.left : 0;
   const shellTop = shellRect ? shellRect.top : 0;
-  const characterRect = characterElement.getBoundingClientRect();
+  const characterWidth = characterElement.offsetWidth || 130;
+  const characterHeight = characterElement.offsetHeight || 130;
   const bubbleRect = speechBubble.getBoundingClientRect();
   const margin = 10;
 
-  const characterX = characterRect.left - shellLeft;
-  const characterY = characterRect.top - shellTop;
-  const characterCenterX = characterX + characterRect.width / 2;
+  const characterX = Number.isFinite(pet.x) ? pet.x : (characterElement.getBoundingClientRect().left - shellLeft);
+  const characterY = Number.isFinite(pet.y) ? pet.y : (characterElement.getBoundingClientRect().top - shellTop);
+  const characterCenterX = characterX + characterWidth / 2;
 
   let left = characterCenterX - bubbleRect.width / 2;
   let top = characterY - bubbleRect.height - 10;
@@ -179,13 +201,14 @@ function positionSpeechBubble() {
   left = Math.max(margin, Math.min(left, shellWidth - bubbleRect.width - margin));
 
   if (top < margin) {
-    top = characterY + characterRect.height + 8;
+    top = characterY + characterHeight + 8;
   }
 
   top = Math.max(margin, Math.min(top, shellHeight - bubbleRect.height - margin));
 
   speechBubble.style.left = `${Math.round(left)}px`;
   speechBubble.style.top = `${Math.round(top)}px`;
+  bubblePositionReady = true;
 }
 
 function setTranslateError(message = "") {
@@ -475,6 +498,54 @@ function applyPosition() {
   positionSpeechBubble();
 }
 
+function isPointOnCharacter(point) {
+  if (!characterElement || !point) {
+    return false;
+  }
+
+  const rect = characterElement.getBoundingClientRect();
+  return (
+    point.x >= rect.left &&
+    point.x <= rect.right &&
+    point.y >= rect.top &&
+    point.y <= rect.bottom
+  );
+}
+
+function isPointOnBubble(point) {
+  if (!speechBubble || !point) {
+    return false;
+  }
+
+  if (!speechBubble.classList.contains("is-visible")) {
+    return false;
+  }
+
+  const rect = speechBubble.getBoundingClientRect();
+  return (
+    point.x >= rect.left &&
+    point.x <= rect.right &&
+    point.y >= rect.top &&
+    point.y <= rect.bottom
+  );
+}
+
+function syncMousePassThrough() {
+  if (dragState || promptOpen) {
+    setIgnoreMouseEvents(false);
+    return;
+  }
+
+  if (!lastMousePoint) {
+    setIgnoreMouseEvents(true);
+    return;
+  }
+
+  const onCharacter = isPointOnCharacter(lastMousePoint);
+  const onBubble = isPointOnBubble(lastMousePoint);
+  setIgnoreMouseEvents(!(onCharacter || onBubble));
+}
+
 function clampPetToBounds() {
   const bounds = getMovementBounds();
   pet.x = Math.min(bounds.maxX, Math.max(bounds.minX, pet.x));
@@ -585,6 +656,7 @@ function tick(nowTs) {
   updateStateTimer(nowTs);
   maybeTriggerAutonomous(nowTs);
   updateMovement(deltaSec);
+  syncMousePassThrough();
   updateDebugPanel();
 
   requestAnimationFrame(tick);
@@ -599,27 +671,32 @@ function bindClickThroughControl() {
   currentIgnoreMouseEvents = true;
 
   window.addEventListener("mousemove", (event) => {
-    if (dragState) {
-      setIgnoreMouseEvents(false);
-      return;
-    }
-
-    if (promptOpen) {
-      setIgnoreMouseEvents(false);
-      return;
-    }
-
-    const target = document.elementFromPoint(event.clientX, event.clientY);
-    const isOnCharacter = Boolean(target && characterElement.contains(target));
-    setIgnoreMouseEvents(!isOnCharacter);
+    lastMousePoint = {
+      x: event.clientX,
+      y: event.clientY
+    };
+    syncMousePassThrough();
   });
 
   window.addEventListener("mouseleave", () => {
-    if (promptOpen) {
-      setIgnoreMouseEvents(false);
-      return;
-    }
-    setIgnoreMouseEvents(true);
+    lastMousePoint = null;
+    syncMousePassThrough();
+  });
+
+  window.addEventListener("pointerdown", (event) => {
+    lastMousePoint = {
+      x: event.clientX,
+      y: event.clientY
+    };
+    syncMousePassThrough();
+  });
+
+  window.addEventListener("mousedown", (event) => {
+    lastMousePoint = {
+      x: event.clientX,
+      y: event.clientY
+    };
+    syncMousePassThrough();
   });
 
   const triggerCharacterInteraction = (reason) => {

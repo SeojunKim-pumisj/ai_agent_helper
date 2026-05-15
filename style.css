@@ -35,10 +35,16 @@ body {
   background: rgba(255, 255, 255, 0.92);
   box-shadow: 0 10px 20px rgba(15, 20, 30, 0.16);
   color: #17202a;
-  pointer-events: none;
+  pointer-events: auto;
   z-index: 9;
   max-height: 180px;
   overflow-y: auto;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.bubble.is-visible {
+  opacity: 1;
 }
 
 .bubble p {
