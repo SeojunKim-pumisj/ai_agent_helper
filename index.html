@@ -16,6 +16,24 @@
         <p id="bubble-text">TranslateMate 준비 완료</p>
       </section>
 
+      <section class="translate-prompt hidden" id="translate-prompt" aria-hidden="true">
+        <form class="translate-form" id="translate-form" novalidate>
+          <label class="translate-label" for="translate-input">번역 입력</label>
+          <textarea
+            id="translate-input"
+            class="translate-input"
+            rows="4"
+            maxlength="2000"
+            placeholder="번역할 텍스트를 입력하거나 단축키로 클립보드를 불러오세요."
+          ></textarea>
+          <p id="translate-error" class="translate-error" role="alert"></p>
+          <div class="translate-actions">
+            <button id="translate-cancel" type="button">취소 (Esc)</button>
+            <button id="translate-submit" type="submit">확인 (Enter)</button>
+          </div>
+        </form>
+      </section>
+
       <section class="character state-idle" id="character" role="button" tabindex="0" aria-label="캐릭터 셸">
         <div class="character-eye left"></div>
         <div class="character-eye right"></div>
