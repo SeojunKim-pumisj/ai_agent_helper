@@ -1,5 +1,6 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const { fileURLToPath } = require("node:url");
 const {
   app,
   BrowserWindow,
@@ -8,6 +9,7 @@ const {
   ipcMain,
   Menu,
   screen,
+  session,
   Tray,
   safeStorage
 } = require("electron");
@@ -20,6 +22,11 @@ const DEFAULT_TRANSLATE_SHORTCUT = "CommandOrControl+Shift+T";
 const PAPAGO_ENDPOINT = "https://papago.apigw.ntruss.com/nmt/v1/translation";
 const PAPAGO_TIMEOUT_MS = 5000;
 const PAPAGO_MAX_RETRIES = 1;
+const TRANSLATE_INPUT_MAX_LENGTH = 2000;
+const TRANSLATE_RATE_LIMIT_WINDOW_MS = 10000;
+const TRANSLATE_RATE_LIMIT_MAX_REQUESTS = 6;
+const MOUSE_CAPTURE_DEFAULT_TTL_MS = 5000;
+const MOUSE_CAPTURE_PROMPT_TTL_MS = 120000;
 
 const SETTINGS_FILE_NAME = "settings.json";
 const SECRETS_FILE_NAME = "secrets.json";
@@ -31,7 +38,8 @@ const DEFAULT_SETTINGS = Object.freeze({
   targetLang: "ko",
   moveSpeed: 1,
   soundEnabled: false,
-  translateShortcut: DEFAULT_TRANSLATE_SHORTCUT
+  translateShortcut: DEFAULT_TRANSLATE_SHORTCUT,
+  clipboardAutoSubmit: false
 });
 
 const SUPPORTED_TARGET_LANGS = new Set([
@@ -49,6 +57,25 @@ const SUPPORTED_TARGET_LANGS = new Set([
   "id"
 ]);
 
+const SUPPORTED_SOURCE_LANGS = new Set(["auto", ...SUPPORTED_TARGET_LANGS]);
+
+const SENSITIVE_CLIPBOARD_PATTERNS = Object.freeze([
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/i,
+  /\b(?:api[_-]?key|secret|token|password|passwd|pwd)\b\s*[:=]\s*["']?[\w./+=:-]{12,}/i,
+  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/,
+  /\b(?:ghp|github_pat|sk|xox[baprs])_[A-Za-z0-9_=-]{16,}\b/,
+  /\b[A-Fa-f0-9]{40,}\b/,
+  /\b[A-Za-z0-9+/]{48,}={0,2}\b/
+]);
+
+const ALLOWED_MOUSE_CAPTURE_REASONS = new Set([
+  "bootstrap",
+  "character-hover",
+  "character-drag",
+  "context-menu",
+  "translate-prompt"
+]);
+
 let runtimeSettings = { ...DEFAULT_SETTINGS };
 let currentShortcut = DEFAULT_TRANSLATE_SHORTCUT;
 let secretState = {
@@ -56,6 +83,9 @@ let secretState = {
   clientSecret: "",
   storage: "none"
 };
+let translatePromptOpen = false;
+let mouseCaptureTimer = null;
+const translationRequestTimestamps = [];
 
 function getSettingsFilePath() {
   return path.join(app.getPath("userData"), SETTINGS_FILE_NAME);
@@ -84,6 +114,84 @@ async function writeJsonFileAtomic(filePath, payload) {
   const tempPath = `${filePath}.tmp`;
   await fs.writeFile(tempPath, JSON.stringify(payload, null, 2), "utf8");
   await fs.rename(tempPath, filePath);
+}
+
+async function deleteFileIfExists(filePath) {
+  try {
+    await fs.rm(filePath, { force: true });
+  } catch {
+    // Best-effort cleanup only. Credential loading must not fail because cleanup failed.
+  }
+}
+
+async function deleteFileStrict(filePath) {
+  await fs.rm(filePath, { force: true });
+}
+
+async function restrictFileToOwner(filePath) {
+  try {
+    await fs.chmod(filePath, 0o600);
+  } catch {
+    // Windows ACLs are not reliably represented by chmod; ignore unsupported platforms.
+  }
+}
+
+function isLocalAppUrl(candidateUrl) {
+  try {
+    const targetPath = path.resolve(fileURLToPath(candidateUrl));
+    const appRootPath = path.resolve(__dirname);
+    return targetPath === appRootPath || targetPath.startsWith(`${appRootPath}${path.sep}`);
+  } catch {
+    return false;
+  }
+}
+
+function hardenWebContents(webContents) {
+  webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+
+  webContents.on("will-navigate", (event, navigationUrl) => {
+    if (!isLocalAppUrl(navigationUrl)) {
+      event.preventDefault();
+    }
+  });
+
+  webContents.on("will-attach-webview", (event) => {
+    event.preventDefault();
+  });
+}
+
+function configureSessionSecurity() {
+  session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => {
+    callback(false);
+  });
+}
+
+function getClipboardRisk(text) {
+  const candidate = typeof text === "string" ? text.trim() : "";
+  if (!candidate) {
+    return null;
+  }
+
+  return SENSITIVE_CLIPBOARD_PATTERNS.some((pattern) => pattern.test(candidate))
+    ? "민감 정보로 보이는 클립보드 내용은 자동 제출하지 않습니다."
+    : null;
+}
+
+function checkTranslateRateLimit() {
+  const now = Date.now();
+  while (
+    translationRequestTimestamps.length > 0 &&
+    now - translationRequestTimestamps[0] > TRANSLATE_RATE_LIMIT_WINDOW_MS
+  ) {
+    translationRequestTimestamps.shift();
+  }
+
+  if (translationRequestTimestamps.length >= TRANSLATE_RATE_LIMIT_MAX_REQUESTS) {
+    return false;
+  }
+
+  translationRequestTimestamps.push(now);
+  return true;
 }
 
 function normalizeErrorCode(code) {
@@ -282,6 +390,38 @@ function setWindowMouseIgnore(ignore) {
   });
 }
 
+function clearMouseCaptureTimer() {
+  if (mouseCaptureTimer) {
+    clearTimeout(mouseCaptureTimer);
+    mouseCaptureTimer = null;
+  }
+}
+
+function releaseMouseCapture() {
+  clearMouseCaptureTimer();
+  setWindowMouseIgnore(true);
+}
+
+function requestMouseCapture(reason, ttlMs = MOUSE_CAPTURE_DEFAULT_TTL_MS) {
+  if (!ALLOWED_MOUSE_CAPTURE_REASONS.has(reason)) {
+    return false;
+  }
+
+  if (reason === "translate-prompt" && !translatePromptOpen) {
+    return false;
+  }
+
+  clearMouseCaptureTimer();
+  setWindowMouseIgnore(false);
+
+  mouseCaptureTimer = setTimeout(() => {
+    mouseCaptureTimer = null;
+    releaseMouseCapture();
+  }, ttlMs);
+
+  return true;
+}
+
 function sendMainRendererEvent(channel, payload) {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return;
@@ -304,6 +444,8 @@ function notifyUser(message, level = "info") {
 
 function openTranslateInput(payload = {}) {
   const prefillText = typeof payload.prefillText === "string" ? payload.prefillText : "";
+  translatePromptOpen = true;
+  requestMouseCapture("translate-prompt", MOUSE_CAPTURE_PROMPT_TTL_MS);
   sendMainRendererEvent("translate:open-input", {
     source: payload.source ?? "manual",
     prefillText,
@@ -320,15 +462,32 @@ function readClipboardText() {
 }
 
 function openTranslateInputFromShortcut() {
+  openClipboardTranslateInput("shortcut");
+}
+
+function openClipboardTranslateInput(source) {
   const clipboardText = readClipboardText();
+  const clipboardRisk = getClipboardRisk(clipboardText);
+  const autoSubmit = Boolean(runtimeSettings.clipboardAutoSubmit && clipboardText && !clipboardRisk);
+
   openTranslateInput({
-    source: "shortcut",
+    source,
     prefillText: clipboardText,
-    autoSubmit: clipboardText.length > 0
+    autoSubmit
   });
 
   if (!clipboardText) {
     notifyUser("클립보드가 비어 있어 입력창만 열었습니다.", "warning");
+    return;
+  }
+
+  if (clipboardRisk) {
+    notifyUser(clipboardRisk, "warning");
+    return;
+  }
+
+  if (!autoSubmit) {
+    notifyUser("클립보드 내용을 입력창에 채웠습니다. 확인 후 제출해 주세요.", "info");
   }
 }
 
@@ -378,16 +537,7 @@ function popupTranslateContextMenu(x, y) {
     {
       label: "클립보드 번역",
       click: () => {
-        const clipboardText = readClipboardText();
-        openTranslateInput({
-          source: "context-menu-clipboard",
-          prefillText: clipboardText,
-          autoSubmit: clipboardText.length > 0
-        });
-
-        if (!clipboardText) {
-          notifyUser("클립보드가 비어 있어 입력창만 열었습니다.", "warning");
-        }
+        openClipboardTranslateInput("context-menu-clipboard");
       }
     },
     { type: "separator" },
@@ -441,6 +591,7 @@ function createMainWindow() {
 
   mainWindow.setAlwaysOnTop(true, "screen-saver");
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  hardenWebContents(mainWindow.webContents);
   mainWindow.loadFile("index.html");
   setWindowMouseIgnore(true);
 
@@ -465,6 +616,7 @@ function createSettingsWindow() {
     }
   });
 
+  hardenWebContents(settingsWindow.webContents);
   settingsWindow.loadFile("settings.html");
 
   settingsWindow.on("close", (event) => {
@@ -546,6 +698,7 @@ function normalizeSettingsInput(input) {
   const moveSpeedRaw = Number(raw.moveSpeed);
   const moveSpeed = Number.isFinite(moveSpeedRaw) ? moveSpeedRaw : NaN;
   const soundEnabled = Boolean(raw.soundEnabled);
+  const clipboardAutoSubmit = Boolean(raw.clipboardAutoSubmit);
   const translateShortcut = typeof raw.translateShortcut === "string" ? raw.translateShortcut.trim() : "";
 
   if (!SUPPORTED_TARGET_LANGS.has(targetLang)) {
@@ -564,6 +717,7 @@ function normalizeSettingsInput(input) {
     targetLang,
     moveSpeed: Math.round(moveSpeed * 100) / 100,
     soundEnabled,
+    clipboardAutoSubmit,
     translateShortcut
   };
 
@@ -597,6 +751,7 @@ async function loadSettingsFromDisk() {
     targetLang: typeof raw.targetLang === "string" ? raw.targetLang : DEFAULT_SETTINGS.targetLang,
     moveSpeed: Number.isFinite(Number(raw.moveSpeed)) ? Number(raw.moveSpeed) : DEFAULT_SETTINGS.moveSpeed,
     soundEnabled: Boolean(raw.soundEnabled),
+    clipboardAutoSubmit: Boolean(raw.clipboardAutoSubmit),
     translateShortcut: typeof raw.translateShortcut === "string" ? raw.translateShortcut : DEFAULT_SETTINGS.translateShortcut
   };
 
@@ -650,6 +805,35 @@ async function saveCredentialsToKeytar(clientId, clientSecret) {
   return true;
 }
 
+async function deleteCredentialsFromKeytar() {
+  const keytar = loadKeytarModule();
+  if (!keytar) {
+    return;
+  }
+
+  await Promise.allSettled([
+    keytar.deletePassword(KEYTAR_SERVICE_NAME, KEYTAR_ACCOUNT_ID),
+    keytar.deletePassword(KEYTAR_SERVICE_NAME, KEYTAR_ACCOUNT_SECRET)
+  ]);
+}
+
+async function deleteCredentialsFromKeytarStrict() {
+  const keytar = loadKeytarModule();
+  if (!keytar) {
+    return;
+  }
+
+  const results = await Promise.allSettled([
+    keytar.deletePassword(KEYTAR_SERVICE_NAME, KEYTAR_ACCOUNT_ID),
+    keytar.deletePassword(KEYTAR_SERVICE_NAME, KEYTAR_ACCOUNT_SECRET)
+  ]);
+  const failedResult = results.find((result) => result.status === "rejected");
+  if (failedResult) {
+    const reason = failedResult.reason;
+    throw reason instanceof Error ? reason : new Error(String(reason ?? "keytar-delete-failed"));
+  }
+}
+
 async function loadCredentialsFromEncryptedFile() {
   const raw = await readJsonFileSafe(getSecretsFilePath());
   if (!raw || typeof raw.clientId !== "string" || typeof raw.clientSecret !== "string") {
@@ -690,12 +874,14 @@ async function saveCredentialsToEncryptedFile(clientId, clientSecret) {
   };
 
   await writeJsonFileAtomic(getSecretsFilePath(), payload);
+  await restrictFileToOwner(getSecretsFilePath());
 }
 
 async function loadStoredCredentials() {
   const fromKeytar = await loadCredentialsFromKeytar();
   if (fromKeytar) {
     secretState = fromKeytar;
+    await deleteFileIfExists(getSecretsFilePath());
     return;
   }
 
@@ -715,6 +901,7 @@ async function loadStoredCredentials() {
 async function saveStoredCredentials(clientId, clientSecret) {
   const savedInKeytar = await saveCredentialsToKeytar(clientId, clientSecret);
   if (savedInKeytar) {
+    await deleteFileIfExists(getSecretsFilePath());
     secretState = {
       clientId,
       clientSecret,
@@ -728,6 +915,16 @@ async function saveStoredCredentials(clientId, clientSecret) {
     clientId,
     clientSecret,
     storage: "safeStorage"
+  };
+}
+
+async function clearStoredCredentials() {
+  await deleteCredentialsFromKeytarStrict();
+  await deleteFileStrict(getSecretsFilePath());
+  secretState = {
+    clientId: "",
+    clientSecret: "",
+    storage: "none"
   };
 }
 
@@ -784,6 +981,29 @@ function registerIpcHandlers() {
     if (!isSettingsWindowSender(event)) {
       return { ok: false, message: "허용되지 않은 요청입니다." };
     }
+
+    return {
+      ok: true,
+      ...getSettingsSnapshot()
+    };
+  });
+
+  ipcMain.handle("settings:delete-credentials", async (event) => {
+    if (!isSettingsWindowSender(event)) {
+      return { ok: false, message: "허용되지 않은 요청입니다." };
+    }
+
+    try {
+      await clearStoredCredentials();
+    } catch {
+      return {
+        ok: false,
+        message: "저장된 API 키를 삭제하지 못했습니다."
+      };
+    }
+
+    broadcastSettingsUpdated();
+    notifyUser("저장된 API 키를 삭제했습니다.", "info");
 
     return {
       ok: true,
@@ -871,18 +1091,17 @@ function registerIpcHandlers() {
       return { ok: false, reason: "forbidden", message: "요청 주체가 유효하지 않습니다." };
     }
 
-    const maxLength = 2000;
     const text = typeof payload === "string" ? payload : "";
     const normalized = text.trim();
     if (!normalized) {
       return { ok: false, reason: "empty", message: "번역할 텍스트를 입력해 주세요." };
     }
 
-    if (normalized.length > maxLength) {
+    if (normalized.length > TRANSLATE_INPUT_MAX_LENGTH) {
       return {
         ok: false,
         reason: "too-long",
-        message: `입력은 ${maxLength}자 이하로 제한됩니다.`
+        message: `입력은 ${TRANSLATE_INPUT_MAX_LENGTH}자 이하로 제한됩니다.`
       };
     }
 
@@ -907,27 +1126,61 @@ function registerIpcHandlers() {
       };
     }
 
-    const maxLength = 2000;
-    if (text.length > maxLength) {
+    if (text.length > TRANSLATE_INPUT_MAX_LENGTH) {
       return {
         ok: false,
         code: "too-long",
-        message: `입력은 ${maxLength}자 이하로 제한됩니다.`
+        message: `입력은 ${TRANSLATE_INPUT_MAX_LENGTH}자 이하로 제한됩니다.`
       };
     }
 
     const source = typeof payload?.source === "string" && payload.source.trim() ? payload.source.trim() : "auto";
     const target = typeof payload?.target === "string" && payload.target.trim() ? payload.target.trim() : runtimeSettings.targetLang;
 
+    if (!SUPPORTED_SOURCE_LANGS.has(source)) {
+      return {
+        ok: false,
+        code: "invalid-source",
+        message: "지원하지 않는 출발 언어입니다."
+      };
+    }
+
+    if (!SUPPORTED_TARGET_LANGS.has(target)) {
+      return {
+        ok: false,
+        code: "invalid-target",
+        message: "지원하지 않는 도착 언어입니다."
+      };
+    }
+
+    if (!checkTranslateRateLimit()) {
+      return {
+        ok: false,
+        code: "rate-limited",
+        message: "번역 요청이 너무 많습니다. 잠시 후 다시 시도해 주세요."
+      };
+    }
+
     return requestPapagoTranslation({ text, source, target });
   });
 
-  ipcMain.on("window:set-ignore-mouse-events", (event, ignore) => {
+  ipcMain.on("window:set-ignore-mouse-events", (event, payload) => {
     if (!mainWindow || event.sender !== mainWindow.webContents) {
       return;
     }
 
-    setWindowMouseIgnore(ignore);
+    const request = typeof payload === "object" && payload !== null
+      ? payload
+      : { ignore: Boolean(payload), reason: "" };
+    const ignore = Boolean(request.ignore);
+    const reason = typeof request.reason === "string" ? request.reason : "";
+
+    if (ignore) {
+      releaseMouseCapture();
+      return;
+    }
+
+    requestMouseCapture(reason);
   });
 
   ipcMain.on("translate:show-context-menu", (event, rawPosition) => {
@@ -947,17 +1200,7 @@ function registerIpcHandlers() {
 
     const mode = payload?.mode === "clipboard" ? "clipboard" : "manual";
     if (mode === "clipboard") {
-      const clipboardText = readClipboardText();
-      openTranslateInput({
-        source: payload?.source ?? "renderer-clipboard",
-        prefillText: clipboardText,
-        autoSubmit: clipboardText.length > 0
-      });
-
-      if (!clipboardText) {
-        notifyUser("클립보드가 비어 있어 입력창만 열었습니다.", "warning");
-      }
-
+      openClipboardTranslateInput(payload?.source ?? "renderer-clipboard");
       return;
     }
 
@@ -968,7 +1211,20 @@ function registerIpcHandlers() {
     });
   });
 
-  ipcMain.on("settings:open", () => {
+  ipcMain.on("translate:prompt-closed", (event) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) {
+      return;
+    }
+
+    translatePromptOpen = false;
+    releaseMouseCapture();
+  });
+
+  ipcMain.on("settings:open", (event) => {
+    if (!isAllowedIpcSender(event)) {
+      return;
+    }
+
     openSettingsWindow();
   });
 
@@ -987,6 +1243,7 @@ async function bootstrapApp() {
   await loadSettingsFromDisk();
   await loadStoredCredentials();
 
+  configureSessionSecurity();
   registerIpcHandlers();
   createMainWindow();
   fitWindowToVirtualDesktop();

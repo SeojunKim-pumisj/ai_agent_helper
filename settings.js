@@ -6,8 +6,10 @@ const moveSpeedInput = document.getElementById("move-speed");
 const moveSpeedValue = document.getElementById("move-speed-value");
 const shortcutInput = document.getElementById("translate-shortcut");
 const soundEnabledInput = document.getElementById("sound-enabled");
+const clipboardAutoSubmitInput = document.getElementById("clipboard-auto-submit");
 const saveMessage = document.getElementById("save-message");
 const closeButton = document.getElementById("close-button");
+const deleteCredentialsButton = document.getElementById("delete-credentials");
 const credentialState = document.getElementById("credential-state");
 
 function setMessage(message = "", tone = "") {
@@ -47,6 +49,10 @@ function applySettingsToForm(payload) {
 
   if (soundEnabledInput) {
     soundEnabledInput.checked = Boolean(settings.soundEnabled);
+  }
+
+  if (clipboardAutoSubmitInput) {
+    clipboardAutoSubmitInput.checked = Boolean(settings.clipboardAutoSubmit);
   }
 
   if (credentialState) {
@@ -89,7 +95,8 @@ async function saveSettings(event) {
     targetLang: targetLangSelect?.value ?? "ko",
     moveSpeed: Number(moveSpeedInput?.value ?? 1),
     translateShortcut: shortcutInput?.value ?? "",
-    soundEnabled: Boolean(soundEnabledInput?.checked)
+    soundEnabled: Boolean(soundEnabledInput?.checked),
+    clipboardAutoSubmit: Boolean(clipboardAutoSubmitInput?.checked)
   };
 
   setMessage("저장 중...", "");
@@ -112,6 +119,40 @@ async function saveSettings(event) {
   setMessage("설정을 저장했습니다.", "success");
 }
 
+async function deleteCredentials() {
+  if (!window.settingsApi || typeof window.settingsApi.deleteCredentials !== "function") {
+    setMessage("API 키 삭제 기능을 사용할 수 없습니다.", "error");
+    return;
+  }
+
+  let response;
+  try {
+    response = await window.settingsApi.deleteCredentials();
+  } catch (error) {
+    setMessage(
+      error?.message ? `API 키 삭제 중 오류가 발생했습니다: ${error.message}` : "API 키 삭제 중 오류가 발생했습니다.",
+      "error"
+    );
+    return;
+  }
+
+  if (!response?.ok) {
+    setMessage(response?.message ?? "API 키 삭제에 실패했습니다.", "error");
+    return;
+  }
+
+  if (clientIdInput) {
+    clientIdInput.value = "";
+  }
+
+  if (clientSecretInput) {
+    clientSecretInput.value = "";
+  }
+
+  applySettingsToForm(response);
+  setMessage("저장된 API 키를 삭제했습니다.", "success");
+}
+
 function closeWindow() {
   if (window.settingsApi?.closeWindow) {
     window.settingsApi.closeWindow();
@@ -128,6 +169,14 @@ function bindEvents() {
 
   closeButton?.addEventListener("click", () => {
     closeWindow();
+  });
+
+  deleteCredentialsButton?.addEventListener("click", () => {
+    if (!window.confirm("저장된 API 키를 삭제할까요?")) {
+      return;
+    }
+
+    void deleteCredentials();
   });
 
   moveSpeedInput?.addEventListener("input", () => {

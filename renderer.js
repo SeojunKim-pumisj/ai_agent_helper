@@ -79,6 +79,7 @@ let pointerMovedDuringDrag = false;
 let ignoreNextCharacterClick = false;
 let lastCharacterReactionTs = 0;
 let lastMousePoint = null;
+let lastMouseCaptureRefreshTs = 0;
 let audioContext = null;
 const runtimeOptions = {
   targetLang: "ko",
@@ -308,7 +309,8 @@ function closeTranslatePrompt(reason = "cancel") {
   }
 
   setPromptVisible(false);
-  setIgnoreMouseEvents(true);
+  setIgnoreMouseEvents(true, "translate-prompt");
+  window.api?.notifyTranslatePromptClosed?.();
   setTranslateError("");
   submittingInput = false;
 
@@ -386,7 +388,7 @@ function openTranslatePrompt(payload = {}) {
   translateInput.value = prefillText;
   setTranslateError("");
   setPromptVisible(true);
-  setIgnoreMouseEvents(false);
+  setIgnoreMouseEvents(false, "translate-prompt");
   focusTranslateInput();
 
   if (payload.autoSubmit && prefillText.trim()) {
@@ -438,16 +440,24 @@ function setState(nextState, reason, durationMs = 0) {
   updateDebugPanel();
 }
 
-function setIgnoreMouseEvents(ignore) {
+function setIgnoreMouseEvents(ignore, reason = "") {
   if (!window.api || typeof window.api.setIgnoreMouseEvents !== "function") {
     return;
   }
 
   if (currentIgnoreMouseEvents === ignore) {
+    const now = performance.now();
+    if (!ignore && reason && now - lastMouseCaptureRefreshTs > 1000) {
+      window.api.setIgnoreMouseEvents(ignore, reason);
+      lastMouseCaptureRefreshTs = now;
+    }
     return;
   }
 
-  window.api.setIgnoreMouseEvents(ignore);
+  window.api.setIgnoreMouseEvents(ignore, reason);
+  if (!ignore) {
+    lastMouseCaptureRefreshTs = performance.now();
+  }
   currentIgnoreMouseEvents = ignore;
 }
 
@@ -596,18 +606,18 @@ function isPointOnBubble(point) {
 
 function syncMousePassThrough() {
   if (dragState || promptOpen) {
-    setIgnoreMouseEvents(false);
+    setIgnoreMouseEvents(false, promptOpen ? "translate-prompt" : "character-drag");
     return;
   }
 
   if (!lastMousePoint) {
-    setIgnoreMouseEvents(true);
+    setIgnoreMouseEvents(true, "pass-through");
     return;
   }
 
   const onCharacter = isPointOnCharacter(lastMousePoint);
   const onBubble = isPointOnBubble(lastMousePoint);
-  setIgnoreMouseEvents(!(onCharacter || onBubble));
+  setIgnoreMouseEvents(!(onCharacter || onBubble), onCharacter || onBubble ? "character-hover" : "pass-through");
 }
 
 function clampPetToBounds() {
@@ -631,7 +641,7 @@ function beginDrag(event) {
   ignoreNextCharacterClick = false;
 
   markInteraction();
-  setIgnoreMouseEvents(false);
+  setIgnoreMouseEvents(false, "character-drag");
   pet.vx = 0;
   pet.vy = 0;
   setState(STATES.PLAY, "drag-start");
@@ -667,7 +677,7 @@ function endDrag(event) {
   markInteraction();
   setState(STATES.IDLE, "drag-end", 250);
   if (!promptOpen) {
-    setIgnoreMouseEvents(true);
+    setIgnoreMouseEvents(true, "character-drag");
   }
 }
 
@@ -731,7 +741,7 @@ function bindClickThroughControl() {
     return;
   }
 
-  window.api.setIgnoreMouseEvents(true);
+  window.api.setIgnoreMouseEvents(true, "bootstrap");
   currentIgnoreMouseEvents = true;
 
   window.addEventListener("mousemove", (event) => {
@@ -811,7 +821,7 @@ function bindClickThroughControl() {
   characterElement.addEventListener("contextmenu", (event) => {
     event.preventDefault();
     markInteraction();
-    setIgnoreMouseEvents(false);
+    setIgnoreMouseEvents(false, "context-menu");
     window.api?.showTranslateContextMenu?.(event.clientX, event.clientY);
   });
 }
