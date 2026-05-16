@@ -112,8 +112,9 @@ https://papago.apigw.ntruss.com/nmt/v1/translation
 현재 클립보드 연동:
 
 - 전역 단축키 실행 시 클립보드 텍스트를 읽는다.
-- 클립보드에 텍스트가 있으면 입력창을 열고 자동 제출한다.
-- 컨텍스트 메뉴에서도 클립보드 번역을 실행할 수 있다.
+- 기본값에서는 클립보드 텍스트를 입력창에 채우기만 하며, 사용자가 직접 제출해야 Papago API 요청이 발생한다.
+- `clipboardAutoSubmit` 설정을 사용자가 켠 경우에만 민감 정보 패턴이 감지되지 않은 클립보드 텍스트를 자동 제출한다.
+- 민감 정보 패턴이 감지되면 자동 제출을 차단하고, 컨텍스트 메뉴에서도 동일한 클립보드 입력 흐름을 사용한다.
 
 ## 설정 기능
 
@@ -164,7 +165,7 @@ app.getPath("userData")/settings.json
 
 Papago API 키는 Main 프로세스에서만 다룬다. Renderer로 평문 secret을 내려보내지 않는다.
 
-현재 우선순위:
+현재 저장 우선순위:
 
 1. `keytar` 사용 가능 시 OS credential store에 저장
 2. `keytar` 사용 불가 시 Electron `safeStorage`로 암호화한 파일에 저장
@@ -182,7 +183,8 @@ fallback 저장 위치:
 app.getPath("userData")/secrets.json
 ```
 
-환경변수 fallback도 구현되어 있다.
+환경변수 fallback도 구현되어 있다. 다만 환경변수는 저장소 우선순위에 포함되는 persisted storage가 아니라 읽기 시점의 read-only fallback이다.
+`getPapagoCredentials()`는 저장된 `secretState`가 있으면 이를 먼저 사용하고, 저장된 값이 없을 때만 아래 환경변수를 읽는다. 설정 화면의 삭제 기능은 OS credential store와 `secrets.json`만 삭제하며 환경변수는 삭제하거나 덮어쓰지 않는다.
 
 ```text
 PAPAGO_CLIENT_ID

@@ -40,7 +40,8 @@
  │   ├── git_convention.md
  │   └── agent_workflow.md
  └── /assets
-     └── icon.ico   (트레이 아이콘, 실제 실행 전 존재 확인 필요)
+     ├── .gitkeep
+     └── icon.ico   (트레이 아이콘, 현재 저장소에는 미포함. 배포 전 실제 아이콘 추가 또는 fallback 구현 필요)
 ```
 
 ## 3. 작업 완료 절차 (필수)
@@ -51,10 +52,10 @@
 - `node --check preload.js`
 - `node --check renderer.js`
 - `node --check settings.js`
-- `npm.cmd audit --audit-level=moderate`
+- `npm audit --audit-level=moderate`
 
 2. 스모크 테스트
-- Windows PowerShell 실행 정책 때문에 `npm`이 막히면 `npm.cmd start`를 사용합니다.
+- Windows PowerShell 실행 정책 때문에 `npm`이 막히면 `npm.cmd audit --audit-level=moderate`, `npm.cmd start`처럼 `.cmd` 실행 파일을 사용합니다.
 - 앱을 실제 실행해 기본 기동 여부를 확인합니다.
 - 최소 확인 항목:
   - 앱 크래시 없이 기동

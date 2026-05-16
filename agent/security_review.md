@@ -43,6 +43,7 @@
   - `will-navigate`에서 앱 내부 file URL 외 이동을 `event.preventDefault()`로 차단.
   - `will-attach-webview` 차단.
   - `session.setPermissionRequestHandler((webContents, permission, callback) => callback(false))`로 권한 요청 기본 거부.
+  - 기본 거부 대상에는 `media`, `geolocation`, `notifications`, `pointerLock`, `midi`, `clipboard-read` 등 Electron permission request가 포함된다. 현재 앱은 카메라, 마이크, 위치, 알림 기능이 없으므로 default-deny가 기준이며, 새 기능이 필요할 때만 origin과 permission allowlist를 별도 이슈로 추가한다.
 
 ### 4. 번역 요청 IPC에 서버 측 rate limit과 언어 allowlist가 부족함
 
@@ -82,7 +83,8 @@
 - 영향: XSS가 생겼을 때 임의 HTTPS endpoint로 데이터를 내보낼 수 있는 여지가 커진다.
 - 보완:
   - `index.html`의 `connect-src`를 `'self'`로 축소한다.
-  - Renderer에서 직접 외부 요청이 필요한 기능이 생길 때만 endpoint 단위로 허용한다.
+  - 현재 구현 기준 Renderer는 Papago 호출, telemetry, CDN fetch, WebSocket 같은 외부 연결을 직접 수행하지 않고, 번역 API 요청은 Main 프로세스 IPC 경유로만 수행한다.
+  - Renderer에서 직접 외부 요청이 필요한 기능이 생길 때만 `https:` 전체 허용 대신 endpoint 단위로 허용한다.
 
 ### 8. 공급망/배포 보안 자동화가 부족함
 
