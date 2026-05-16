@@ -22,6 +22,7 @@
           <input id="papago-client-secret" type="password" autocomplete="off" />
           <p class="hint">비워두면 기존 키를 유지합니다. 변경 시 두 필드를 모두 입력하세요.</p>
           <p id="credential-state" class="meta"></p>
+          <button id="delete-credentials" type="button" class="danger">저장된 API 키 삭제</button>
         </section>
 
         <section class="card">
@@ -51,6 +52,11 @@
           <label class="checkbox-row" for="sound-enabled">
             <input id="sound-enabled" type="checkbox" />
             <span>알림음 사용</span>
+          </label>
+
+          <label class="checkbox-row" for="clipboard-auto-submit">
+            <input id="clipboard-auto-submit" type="checkbox" />
+            <span>클립보드 자동 제출</span>
           </label>
         </section>
 

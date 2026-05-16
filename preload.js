@@ -8,8 +8,11 @@ contextBridge.exposeInMainWorld("api", Object.freeze({
   translateText: (text, source = "auto", target = "ko") => {
     return ipcRenderer.invoke("translate:request", { text, source, target });
   },
-  setIgnoreMouseEvents: (ignore) => {
-    ipcRenderer.send("window:set-ignore-mouse-events", Boolean(ignore));
+  setIgnoreMouseEvents: (ignore, reason = "") => {
+    ipcRenderer.send("window:set-ignore-mouse-events", {
+      ignore: Boolean(ignore),
+      reason: typeof reason === "string" ? reason : ""
+    });
   },
   openTranslateInput: (mode = "manual", source = "renderer") => {
     ipcRenderer.send("translate:open-input", { mode, source });
@@ -19,6 +22,9 @@ contextBridge.exposeInMainWorld("api", Object.freeze({
       x: Number(x),
       y: Number(y)
     });
+  },
+  notifyTranslatePromptClosed: () => {
+    ipcRenderer.send("translate:prompt-closed");
   },
   openSettingsWindow: () => {
     ipcRenderer.send("settings:open");
@@ -43,6 +49,7 @@ contextBridge.exposeInMainWorld("api", Object.freeze({
 contextBridge.exposeInMainWorld("settingsApi", Object.freeze({
   getSettings: () => ipcRenderer.invoke("settings:get"),
   saveSettings: (payload) => ipcRenderer.invoke("settings:save", payload ?? {}),
+  deleteCredentials: () => ipcRenderer.invoke("settings:delete-credentials"),
   closeWindow: () => ipcRenderer.send("settings:close"),
   onSettingsUpdated: (callback) => {
     const listener = (_event, payload) => callback(payload ?? {});

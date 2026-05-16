@@ -142,3 +142,14 @@ button.ghost {
 button.ghost:hover {
   background: #eef3fa;
 }
+
+button.danger {
+  align-self: flex-start;
+  color: #b42318;
+  background: #fff;
+  border-color: rgba(180, 35, 24, 0.35);
+}
+
+button.danger:hover {
+  background: #fff1f0;
+}
