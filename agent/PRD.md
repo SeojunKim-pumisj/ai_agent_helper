@@ -29,7 +29,8 @@
 ### 2.2 파파고 API 연동 번역 기능
 * **입력 인터페이스:** 
   * 캐릭터 우클릭 메뉴 또는 지정된 단축키(예: `Ctrl + Shift + T`)를 통해 텍스트 입력창(팝업)을 호출합니다.
-  * 복사된 텍스트가 있는 상태에서 단축키를 누르면 자동으로 클립보드 내용을 가져와 번역하는 기능을 지원합니다.
+  * 복사된 텍스트가 있는 상태에서 단축키를 누르면 클립보드 내용을 입력창에 채울 수 있습니다.
+  * 클립보드 내용을 사용자 확인 없이 즉시 외부 번역 API로 자동 제출하는 동작은 기본값으로 사용하지 않습니다. 자동 제출은 별도 설정으로 opt-in 처리하고, 민감 정보 패턴 감지 시 차단해야 합니다. 민감 정보 패턴 예시는 API key, JWT, private key header, 긴 hex/base64 토큰이며, 상세 기준은 `agent/security_review.md`의 클립보드 위험 항목을 따릅니다.
 * **번역 처리:** 
   * 사용자가 문장을 입력하면 네이버 클라우드 Papago NMT API를 호출하여 번역을 수행합니다.
   * 출발어(자동 감지) 및 도착어(기본 설정 언어, 예: 한국어/영어)를 지원합니다.
@@ -55,19 +56,23 @@
 
 ## 4. 기술 요구사항 (Technical Requirements)
 
-### 4.1 권장 기술 스택 (크로스 플랫폼 지원 고려 시)
-* **프레임워크:** Electron.js (웹 기술 기반, 투명 창 및 시스템 트레이 제어 용이) 또는 Tauri (Rust 기반, 가볍고 성능이 뛰어남).
-* **언어/UI:** HTML, CSS, JavaScript (React 또는 Vanilla JS).
-* **대안 (Python 선호 시):** PyQt5 또는 Tkinter (투명 배경 및 최상단 고정 기능 구현 가능).
+### 4.1 현재 구현 기술 스택
+* **프레임워크:** Electron.js (웹 기술 기반, 투명 창 및 시스템 트레이 제어 용이)
+* **언어/UI:** HTML, CSS, Vanilla JavaScript
+* **상태 관리:** 별도 프레임워크 없이 Renderer JavaScript 내부 상태 객체로 관리
+* **스택 변경 정책:** React, Vue, Tauri, Python GUI 등으로 전환하려면 별도 이슈와 PRD 변경이 먼저 필요합니다.
 
 ### 4.2 외부 API 연동
 * **API:** Naver Cloud Platform - Papago Text Translation API
 * **네트워크 통신:** REST API(POST 요청)를 통한 JSON 데이터 송수신.
 
 ### 4.3 보안 및 데이터 처리
-* 사용자의 API 키는 Electron `safeStorage` API(`encryptStringAsync`/`decryptStringAsync`)로 암호화해 저장해야 하며, 암복호화는 반드시 Main 프로세스에서만 수행하고 평문 키를 Renderer로 전달하지 않아야 합니다.
-* `safeStorage`는 macOS Keychain, Windows DPAPI, Linux libsecret(환경 의존) 등 OS 보안 저장 메커니즘을 사용하므로, 비동기 처리와 암복호화 실패 예외 처리를 포함해야 합니다. (`electron-store` 단독 암호화는 고보안 비밀 저장 용도로 사용하지 않음)
-* 번역 기록은 로컬에만 임시 저장되며, 외부 서버로 수집되지 않아야 합니다.
+* 사용자의 API 키는 가능하면 `keytar`를 통해 OS credential store에 저장합니다.
+* `keytar` 사용이 불가능한 환경에서는 Electron `safeStorage` API(`encryptString`/`decryptString`)로 암호화한 파일을 fallback 저장소로 사용합니다.
+* 암복호화와 API 호출은 반드시 Main 프로세스에서만 수행하고, 평문 키를 Renderer로 전달하지 않아야 합니다.
+* `safeStorage`는 macOS Keychain, Windows DPAPI, Linux libsecret(환경 의존) 등 OS 보안 저장 메커니즘을 사용하므로 암복호화 실패 예외 처리를 포함해야 합니다. (`electron-store` 단독 암호화는 고보안 비밀 저장 용도로 사용하지 않음)
+* 번역 요청 텍스트는 Papago API 호출을 위해 외부 API로 전송됩니다. 앱 자체 서버로 별도 수집하지 않아야 하며, 번역 기록 저장 기능은 별도 이슈 없이 추가하지 않습니다.
+* 클립보드 텍스트는 민감 정보가 포함될 수 있으므로 기본 자동 제출을 금지하고, 사용자가 명시적으로 제출한 경우에만 외부 API로 전송합니다.
 
 ---
 
