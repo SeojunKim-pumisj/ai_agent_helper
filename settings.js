@@ -125,7 +125,17 @@ async function deleteCredentials() {
     return;
   }
 
-  const response = await window.settingsApi.deleteCredentials();
+  let response;
+  try {
+    response = await window.settingsApi.deleteCredentials();
+  } catch (error) {
+    setMessage(
+      error?.message ? `API 키 삭제 중 오류가 발생했습니다: ${error.message}` : "API 키 삭제 중 오류가 발생했습니다.",
+      "error"
+    );
+    return;
+  }
+
   if (!response?.ok) {
     setMessage(response?.message ?? "API 키 삭제에 실패했습니다.", "error");
     return;
@@ -162,6 +172,10 @@ function bindEvents() {
   });
 
   deleteCredentialsButton?.addEventListener("click", () => {
+    if (!window.confirm("저장된 API 키를 삭제할까요?")) {
+      return;
+    }
+
     void deleteCredentials();
   });
 

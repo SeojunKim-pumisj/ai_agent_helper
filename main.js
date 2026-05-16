@@ -69,6 +69,7 @@ const SENSITIVE_CLIPBOARD_PATTERNS = Object.freeze([
 ]);
 
 const ALLOWED_MOUSE_CAPTURE_REASONS = new Set([
+  "bootstrap",
   "character-hover",
   "character-drag",
   "context-menu",
@@ -121,6 +122,10 @@ async function deleteFileIfExists(filePath) {
   } catch {
     // Best-effort cleanup only. Credential loading must not fail because cleanup failed.
   }
+}
+
+async function deleteFileStrict(filePath) {
+  await fs.rm(filePath, { force: true });
 }
 
 async function restrictFileToOwner(filePath) {
@@ -411,9 +416,7 @@ function requestMouseCapture(reason, ttlMs = MOUSE_CAPTURE_DEFAULT_TTL_MS) {
 
   mouseCaptureTimer = setTimeout(() => {
     mouseCaptureTimer = null;
-    if (reason !== "translate-prompt" || !translatePromptOpen) {
-      releaseMouseCapture();
-    }
+    releaseMouseCapture();
   }, ttlMs);
 
   return true;
@@ -814,6 +817,23 @@ async function deleteCredentialsFromKeytar() {
   ]);
 }
 
+async function deleteCredentialsFromKeytarStrict() {
+  const keytar = loadKeytarModule();
+  if (!keytar) {
+    return;
+  }
+
+  const results = await Promise.allSettled([
+    keytar.deletePassword(KEYTAR_SERVICE_NAME, KEYTAR_ACCOUNT_ID),
+    keytar.deletePassword(KEYTAR_SERVICE_NAME, KEYTAR_ACCOUNT_SECRET)
+  ]);
+  const failedResult = results.find((result) => result.status === "rejected");
+  if (failedResult) {
+    const reason = failedResult.reason;
+    throw reason instanceof Error ? reason : new Error(String(reason ?? "keytar-delete-failed"));
+  }
+}
+
 async function loadCredentialsFromEncryptedFile() {
   const raw = await readJsonFileSafe(getSecretsFilePath());
   if (!raw || typeof raw.clientId !== "string" || typeof raw.clientSecret !== "string") {
@@ -899,8 +919,8 @@ async function saveStoredCredentials(clientId, clientSecret) {
 }
 
 async function clearStoredCredentials() {
-  await deleteCredentialsFromKeytar();
-  await deleteFileIfExists(getSecretsFilePath());
+  await deleteCredentialsFromKeytarStrict();
+  await deleteFileStrict(getSecretsFilePath());
   secretState = {
     clientId: "",
     clientSecret: "",
